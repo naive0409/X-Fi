@@ -1,0 +1,30 @@
+seed: 3407
+data:
+  root: ../data/XRF55_Dataset_split
+  train_batch_size: 512
+  test_batch_size: 512
+  num_workers: 4
+  val_split: 0.05
+  modality_keep_probs:
+  - 0.5
+  - 0.9
+  - 0.6
+linear_probe:
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_every: 1
+  head_type: linear
+finetune:
+  epochs: 100
+  head_lr: 0.0001
+  backbone_lr: 0.0001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_every: 1
+eval:
+  save_json: auto
+  selection_metric: acc_all
+_variant: 'warmstart: JEPA init + backbone_lr 1e-4, otherwise default B-recipe (wd
+  0.05, warmup+cosine, val 0.05, best-by-val). Compare vs Bp_ft_ep100 0.7061.'

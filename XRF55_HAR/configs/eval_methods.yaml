@@ -1,0 +1,45 @@
+# Downstream evaluation config (JEPAREADME §4.4, §5.4) — method switching for A/B/C comparison.
+# jepa_downstream.py reads this file. Methods (--method):
+#   xfi_supervised    : original X_Fi + checkpoint, eval only            -> group A
+#   jepa_linear_probe : JEPA ckpt, freeze projector+X_Fusion, train head -> group B
+#   jepa_finetune     : JEPA ckpt, unfreeze projector+X_Fusion (low lr)  -> group B'
+#   random_init       : random projector+X_Fusion + linear probe         -> group C (lower bound)
+
+seed: 3407
+
+data:
+  root: ../data/XRF55_Dataset_split
+  # 2026-09-19: raised from 16/32 (per-group numbers must all use the SAME value to stay
+  # comparable — B/B'/C read this one config). 512 verified working by human on 32GB V100
+  # (pin_memory is off, D16 does not apply here). test_batch_size is inference-only: BN in
+  # eval mode + sample-granularity accuracy => batch size has ZERO effect on reported accuracy.
+  train_batch_size: 512
+  test_batch_size: 512
+  num_workers: 4
+  val_split: 0.05         # stratified hold-out from train (14630/770); used ONLY for best.pth
+                          # selection (never the test set -> no test leakage into model
+                          # selection). Lowered from 0.1 by human, 2026-09-19.
+  # modality-subset sampling during probe/finetune training, mirroring the original X-Fi
+  # supervised protocol (utils.py generate_none_empth_modality_list); order [mmwave, wifi, rfid]
+  modality_keep_probs: [0.5, 0.9, 0.6]
+
+linear_probe:
+  epochs: 100
+  lr: 1.0e-3            # head-only; higher than X-Fi's 1e-4 because only the head trains
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_every: 1         # validate every N epochs for best.pth selection
+  head_type: linear     # linear (LayerNorm+Linear on mean-pooled z_cm) | mlp
+
+finetune:
+  epochs: 100
+  head_lr: 1.0e-4
+  backbone_lr: 1.0e-5   # projector + X_Fusion (classification head of X_Fusion stays frozen/unused)
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_every: 1         # validate every N epochs for best.pth selection
+
+eval:
+  # reported for every method: 7 fixed subsets (sample-granularity accuracy) + worst-subset
+  save_json: auto       # <run_dir>/results.json; set a path to override
+  selection_metric: acc_all   # metric on the val split for best.pth: acc_all | macro_avg | worst_subset

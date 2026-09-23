@@ -1,0 +1,43 @@
+seed: 3407
+data:
+  root: ../data/XRF55_Dataset_split
+  batch_size: 512
+  num_workers: 4
+  val_split: 0.05
+  pin_memory: false
+  prefetch_factor: 2
+model:
+  model_depth: 5
+  num_classes: 55
+  backbone_root: ./backbone_models
+  predictor:
+    depth: 4
+    num_heads: 8
+    ffn_dim: 2048
+    dropout: 0.0
+optim:
+  lr: 0.0005
+  weight_decay: 0.05
+  warmup_epochs: 5
+  epochs: 100
+ema:
+  base_momentum: 0.996
+bn_warmup_batches: 50
+mask:
+  modality_keep_probs:
+  - 0.5
+  - 0.7
+  - 0.5
+  token_mask_rate: 0.25
+log:
+  save_dir: ./jepa_checkpoints
+  save_every_epochs: 10
+  log_masks_first_epoch: true
+aux_loss:
+  weight: 0.5
+  ramp_epochs: 5
+  normalize: both
+_variant: 'round-2 item 1: cross-modal auxiliary prediction loss (predict ABSENT modality
+  EMA-projected features from the aggregate prediction, linear heads, parameter-free
+  LN on both sides) + WiFi keep 0.9->0.7 (model practices WiFi-absent aggregation
+  and WiFi inference much more often).'

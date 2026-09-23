@@ -1,0 +1,52 @@
+# JEPA pretraining config (JEPAREADME §4.5, §5.1).
+# All hyperparameters of stage 1 live here; jepa_pretrain.py reads this file.
+
+seed: 3407                # base seed; mask rng = seed+1, data order = seed+2 (JEPAREADME §5.2 trap 8)
+
+data:
+  root: ../data/XRF55_Dataset_split   # symlink split tree built by make_xrf55_split.py
+  batch_size: 512 # 16          # same as X-Fi original; lower if VRAM runs out
+  num_workers: 4
+  val_split: 0.05         # stratified hold-out from train (labels from filenames); used ONLY
+                          # to select the best_val checkpoint (SSL loss on unseen data).
+                          # 0.05 => 14630 train / 770 val (lowered from 0.1 by human, 2026-09-19)
+  pin_memory: false       # KEEP false on this server: batch>=256 pins ~6.8GB page-locked host
+  prefetch_factor: 2      # memory in the DataLoader pin thread and fails with "CUDA error:
+                          # invalid argument" (locked-memory/IOMMU limited). Pinning gains
+                          # almost nothing here (~85ms H2D per batch, overlapped with compute).
+
+model:
+  model_depth: 5          # X_Fusion depth loop, same as X_Fi
+  num_classes: 55         # kept for module-shape compatibility with X_Fi (head unused)
+  backbone_root: ./backbone_models
+  predictor:
+    depth: 4              # transformer layers
+    num_heads: 8
+    ffn_dim: 2048
+    dropout: 0.0
+
+optim:
+  lr: 5.0e-4              # AdamW on linear_projector + X_Fusion (head excluded) + predictor + mask_token
+                          # NOTE: 5e-4 was tuned for batch 16 (JEPAREADME §5.1). If you raise
+                          # batch_size to 128-256, consider lr 1e-3 (and document the deviation
+                          # from the spec'd baseline config in JEPACHANGES.md).
+  weight_decay: 0.05
+  warmup_epochs: 5        # linear warmup, then cosine to 0
+  epochs: 100
+
+ema:
+  base_momentum: 0.996    # -> 1.0 cosine over training (I-JEPA)
+
+bn_warmup_batches: 50     # forward-only batches before training so BN running stats converge,
+                          # then synced into the EMA branch (skipped when --resume)
+
+mask:
+  # modality-level mask, sampled per sample in the train loop (JEPAREADME §3.4).
+  # Order = modality_list order: [mmwave, wifi, rfid]. At least one modality is enforced.
+  modality_keep_probs: [0.5, 0.9, 0.5]
+  token_mask_rate: 0.25   # token-level mask on present modalities (mask_token replacement)
+
+log:
+  save_dir: ./jepa_checkpoints
+  save_every_epochs: 10   # periodic checkpoint; `last.pth` is overwritten every epoch
+  log_masks_first_epoch: true   # sample-record context/token masks of the first batches
