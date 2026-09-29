@@ -28,7 +28,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from tqdm import tqdm
 
 try:  # optional dependency: TB logging is enabled automatically once tensorboard is installed
@@ -43,6 +43,9 @@ from jepa_modules import Predictor, EMATargetEncoder, AuxModalityHeads
 MODALITY_NAMES = ['mmWave', 'WiFi', 'RFID']
 MODALITY_IDX = {'mmWave': 0, 'WiFi': 1, 'RFID': 2}
 SUBSET_NAMES = ['mmWave', 'WiFi', 'RFID', 'mmWave+WiFi', 'mmWave+RFID', 'WiFi+RFID', 'all']
+SUBSET_BOOLS = [[True, False, False], [False, True, False], [False, False, True],
+                [True, True, False], [True, False, True], [False, True, True],
+                [True, True, True]]
 
 
 def jepa_collate(batch):
@@ -166,27 +169,45 @@ def main():
         print('[warn] tensorboard is not installed -> TB logging disabled '
               '(enable with: conda run -n xfi pip install tensorboard); CSV keeps all metrics')
 
-    train_dataset_full = XRF55_Datase(root_dir=cfg['data']['root'], scene='all', is_train=True)
+    train_part = XRF55_Datase(root_dir=cfg['data']['root'], scene='all', is_train=True)
     n_workers = int(cfg['data'].get('num_workers', 4))
 
+    # ---- optional data scaling (JEPACHANGES §4-16): include the TEST split UNLABELED in the
+    # ---- pretraining corpus (+6600 samples, +43%). Protocol change vs A' — must be
+    # ---- disclosed; labels remain unused. Index space: train [0, len(train_part)) and
+    # ---- test [len(train_part), ...) inside the ConcatDataset.
+    include_test = bool(cfg['data'].get('include_test_split', False))
+    if include_test:
+        test_part = XRF55_Datase(root_dir=cfg['data']['root'], scene='all', is_train=False)
+        corpus = ConcatDataset([train_part, test_part])
+        n_test_added = len(test_part)
+    else:
+        corpus = train_part
+        n_test_added = 0
+
     # ---- stratified train/val split (labels parsed from filenames, no data loading); the
-    # ---- val part is ONLY used to pick the best_val checkpoint (SSL loss on unseen data)
+    # ---- val part is ONLY used to pick the best_val checkpoint (SSL loss on unseen data).
+    # ---- Val is ALWAYS drawn from the TRAIN part only — test data never touches val.
     val_split = float(cfg['data'].get('val_split', 0.0))
     val_loader = None
+    val_idx = stratified_val_indices(train_part.RFID_name_list, val_split,
+                                     cfg['seed'] + 7) if val_split > 0 else []
+    train_idx = sorted(set(range(len(train_part))) - set(val_idx))
+    if include_test:
+        train_idx = train_idx + list(range(len(train_part), len(train_part) + n_test_added))
+    train_dataset = Subset(corpus, train_idx)
     if val_split > 0:
-        val_idx = stratified_val_indices(train_dataset_full.RFID_name_list, val_split,
-                                         cfg['seed'] + 7)
-        train_idx = sorted(set(range(len(train_dataset_full))) - set(val_idx))
-        train_dataset = Subset(train_dataset_full, train_idx)
-        val_dataset = Subset(train_dataset_full, val_idx)
+        val_dataset = Subset(corpus, val_idx)
         val_loader = DataLoader(val_dataset, batch_size=cfg['data']['batch_size'], shuffle=False,
                                 num_workers=n_workers, collate_fn=jepa_collate,
                                 persistent_workers=n_workers > 0)
-        print(f'pretrain data: train {len(train_idx)} / val {len(val_idx)} samples '
-              f'(val_split={val_split}, used only for best_val checkpoint selection)')
+    if include_test:
+        print(f'pretrain corpus: {len(train_dataset)} train / {len(val_idx)} val samples '
+              f'(train {len(train_part) - len(val_idx)} + test {n_test_added} UNLABELED — '
+              f'protocol change vs A\', disclosed; val drawn from train part only)')
     else:
-        train_dataset = train_dataset_full
-        print(f'pretrain dataset: {len(train_dataset)} samples (no val split)')
+        print(f'pretrain data: train {len(train_dataset)} / val {len(val_idx)} samples '
+              f'(val_split={val_split}, used only for best_val checkpoint selection)')
 
     loader = DataLoader(
         train_dataset,
@@ -284,6 +305,14 @@ def main():
     mask_cfg = cfg['mask']
     keep_probs = np.array(mask_cfg['modality_keep_probs'], dtype=np.float64)
     token_rate = float(mask_cfg['token_mask_rate'])
+    subset_schedule = mask_cfg.get('subset_schedule', 'probs')
+    token_mode = mask_cfg.get('token_mode', 'bernoulli')
+    block_len = max(1, min(32, int(mask_cfg.get('block_len', 4))))
+    if subset_schedule == 'balanced':
+        print('subset schedule: balanced (round-robin over the 7 subsets — equal practice, '
+              'keep_probs retired)')
+    if token_mode == 'block':
+        print(f'token mask mode: block (contiguous len {block_len}, rate {token_rate})')
 
     # ---- BN warmup: run forward-only batches in train mode so the projector's BatchNorm
     # ---- running stats converge (the frozen extractors' output scales differ a lot per
@@ -324,6 +353,8 @@ def main():
         aux_sum, aux_n = 0.0, 0
         subset_count = {s: 0 for s in SUBSET_NAMES}
         momentum_used = None
+        cycle_order = (mask_rng.permutation(len(SUBSET_BOOLS))
+                       if subset_schedule == 'balanced' else None)
 
         progress = tqdm(loader, total=steps_per_epoch, desc=f'epoch {epoch + 1}')
         for i, (mmwave, wifi, rfid, _labels) in enumerate(progress):
@@ -334,17 +365,34 @@ def main():
             rfid = rfid.to(device, non_blocking=True)
             bsz = mmwave.size(0)
 
-            # step 2: modality-level context mask — ONE list per batch, mirroring the original
-            # X-Fi collate mechanism (the backbone signature takes a single list; per-sample
-            # granularity is provided by the token mask below). Non-empty guaranteed (trap 6).
-            while True:
-                draws = mask_rng.random_sample(3) < keep_probs
-                if draws.any():
-                    break
-            modality_list = [bool(v) for v in draws]
+            # step 2: modality-level context mask — ONE list per batch. 'balanced' (R4):
+            # round-robin over the 7 subsets with a per-epoch shuffled order, so every
+            # modality combination gets equal practice (D32 root-cause 2). 'probs': the
+            # original iid sampling. Both guarantee non-empty (trap 6).
+            if subset_schedule == 'balanced':
+                modality_list = list(SUBSET_BOOLS[int(cycle_order[i % len(SUBSET_BOOLS)])])
+            else:
+                while True:
+                    draws = mask_rng.random_sample(3) < keep_probs
+                    if draws.any():
+                        break
+                modality_list = [bool(v) for v in draws]
 
             # step 3: token-level mask, per sample, present modalities only
-            token_mask_np = mask_rng.random_sample((bsz, 3, 32)) < token_rate
+            if token_mode == 'block':
+                # R4: contiguous temporal blocks (JEPA-MSAC / WiFi-JEPA-style structured
+                # masking) instead of iid tokens — forces inference across contiguous spans
+                token_mask_np = np.zeros((bsz, 3, 32), dtype=bool)
+                n_starts = 32 - block_len + 1
+                n_blocks = max(1, int(round(32 * token_rate / block_len)))
+                for s in range(bsz):
+                    for m in range(3):
+                        if not modality_list[m]:
+                            continue
+                        for st in mask_rng.permutation(n_starts)[:n_blocks]:
+                            token_mask_np[s, m, int(st):int(st) + block_len] = True
+            else:
+                token_mask_np = mask_rng.random_sample((bsz, 3, 32)) < token_rate
             token_mask_np[:, [j for j in range(3) if not modality_list[j]], :] = False
             token_mask = torch.from_numpy(token_mask_np).to(device)
 

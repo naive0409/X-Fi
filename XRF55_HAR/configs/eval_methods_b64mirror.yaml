@@ -1,0 +1,33 @@
+seed: 3407
+data:
+  root: ../data/XRF55_Dataset_split
+  train_batch_size: 64
+  test_batch_size: 512
+  num_workers: 4
+  val_split: 0.0
+  modality_keep_probs:
+  - 0.5
+  - 0.9
+  - 0.6
+linear_probe:
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_every: 1
+  head_type: linear
+finetune:
+  epochs: 100
+  head_lr: 0.0001
+  backbone_lr: 0.0001
+  weight_decay: 0.01
+  warmup_epochs: 0
+  eval_every: 1
+  schedule: none
+eval:
+  save_json: auto
+  selection_metric: acc_all
+_variant: "Round-3 \u2461 step-budget experiment: mirror recipe (constant lr 1e-4\
+  \ / wd 0.01 / no val / last-model) at batch 64 \u2014 24.1K steps vs 3.1K steps\
+  \ @ batch 512. Tests whether the mmWave-family deficit vs A_off (96K steps) is a\
+  \ step-count issue."

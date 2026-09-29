@@ -14,6 +14,9 @@
 | 阶段 2（下游对比 A_off/A'/B/B'/C） | ✅ 完成并汇总（§6 对比表 + D25/D27）：判据 ③✓（B−C macro +45.4pp）、判据 ④ WiFi✓/RFID✗；**核心对比 B' vs A'（自训原版）macro −1.0pp、WiFi-only +3.8pp** |
 | 性能提升第一轮（B' 配方修正 + few-shot） | ✅ 完成（§7 清单 + D29）：**mirror 配方下 B' 追平原版**（macro 0.7171 ≥ 0.7162，worst +1.7pp），采纳为默认 finetune 配方；few-shot 10% 标签下 JEPA 仅 +0.4pp——SSL 优势未显现，归因与下轮方案见 D29 |
 | 性能提升第二轮（辅助损失 + WiFi0.7 掩码） | ✅ 完成（§7 第二轮表 + D31）：**总目标达成——R3.3 macro 0.7426 超过 A'（+2.6pp）与 A_off（+2.2pp），全模态 0.8964 全组最高，WiFi-only +10.1pp**；剩余短板 worst-subset（RFID-only） |
+| 性能提升第四轮（①22000 数据扩展 + ②步数预算） | ✅ 完成（§7 第四轮表 + D38）：**R4.6 macro 0.7634 创新高——vs A' 7/7 全胜（+4.7pp）、vs A_off +4.3pp 且 worst-subset 0.4386 首次反超（RFID-only 短板攻克）、WiFi-only 0.7395（vs A_off +17.9pp）**；步数假说证实（b64 +1.8pp） |
+| 性能提升第五轮（因子合并 run） | ✅ 完成（§7 第五轮 + D39）：**因子不可加**——22000 语料 + b64 合并 run macro 0.7266，比两个单因子都差；**最终配方定格 = pretrain_aux_22000 (epoch_100) + mirror 微调（b512）= macro 0.7634**；b64 路线证伪封存；待办=标签效率曲线 + 探针选点（可选） |
+| 性能提升第三轮（R4 均衡练习 + 块掩码） | ✅ 完成（§7 第三轮表 + D35）：R4.3 macro 0.7410 与 R3.3 打平（判定门未过）——**两轮配方收敛于同一平台（~0.74），"仅预训练融合层 + 同分布数据"的天花板已到**；轮巡/块掩码按设计工作但无增量；下一轮候选（数据扩展/步数预算/解冻末层/消融）等人工决策，见 D35 |
 | 服务器 | 3× Tesla V100-32GB **公用**：先 `nvidia-smi` 挑空闲卡，`CUDA_VISIBLE_DEVICES=<N>` 指定，一次一张卡 |
 
 ---
@@ -101,7 +104,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n xfi --no-capture-output python jepa_pretrain
 | `--dataset <路径>` | （可选）覆盖 config 里的数据根目录，默认即 `../data/XRF55_Dataset_split` |
 | `--resume <ckpt>` | （可选）从断点续训，需同时传同一个 `--run-name`，如 `--resume ./jepa_checkpoints/<run名>/last.pth --run-name <run名>` |
 | `--limit-train-batches N` / `--epochs N` | 调试用，正式训练不传 |
-| 预期输出 | 开训前先打印 `BN warmup: 50 forward-only batches ...`（约半分钟）和 train/val 划分（默认 13860/1540）。每 epoch：JEPA loss、z_tgt std（<0.1 会告警塌缩）、词元掩码率、7 种子集采样频率、EMA momentum、**val: loss / explained var**（留出 10% 训练集上的确定性 SSL 验证：全模态、无词元掩码）；val loss 创新低时打印 `[best] ... best_val.pth updated`。产物（都在 `<run名>/` 内）：`train_log.csv`（含 val_loss/val_expl_var 列）+ tensorboard（Loss/train_step、Loss/train_epoch、Metrics/ztgt_std、Optim/lr、Optim/ema_momentum、Sampling/freq_*、**Val/loss、Val/explained_var**）+ `config.yaml` 快照 + **`best_val.pth`（验证 SSL 损失最低的权重）** + `last.pth`（run 内每 epoch 覆盖，供续训）+ `epoch_XXX.pth`（每 10 epoch 长期保留；单 ckpt 约 400MB）。健康曲线参考 D18/D19；**收敛判据建议看解释方差而非绝对 loss**（D19） |
+| 预期输出 | 开训前先打印 `BN warmup: 50 forward-only batches ...`（约半分钟）和 train/val 划分（默认 13860/1540）。每 epoch：JEPA loss、z_tgt std（<0.1 会告警塌缩）、词元掩码率、7 种子集采样频率、EMA momentum、**val: loss / explained var**（留出 10% 训练集上的确定性 SSL 验证：全模态、无词元掩码）；val loss 创新低时打印 `[best] ... best_val.pth updated`。产物（都在 `<run名>/` 内）：`train_log.csv`（含 val_loss/val_expl_var 列）+ tensorboard（Loss/train_step、Loss/train_epoch、Metrics/ztgt_std、Optim/lr、Optim/ema_momentum、Sampling/freq_*、**Val/loss、Val/explained_var**）+ `config.yaml` 快照 + **`best_val.pth`（验证 SSL 损失最低的权重——⚠️ 仅作诊断产出，见 D34：该判据偏向低信息量检查点，下游请用 `epoch_100.pth`）** + `last.pth`（run 内每 epoch 覆盖，供续训）+ `epoch_XXX.pth`（每 10 epoch 长期保留；单 ckpt 约 400MB）。健康曲线参考 D18/D19；**收敛判据建议看解释方差而非绝对 loss**（D19） |
 | 验收（§5.4 判据 1/2） | 损失稳定下降、无 NaN；z_tgt std 不塌缩（>0.1 量级） |
 
 ### 1.7 阶段 2 命令：下游评估（按方法分条跑；或用 §1.8 一键）
@@ -394,6 +397,181 @@ CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_pre
 | `--run-name` | 分别产出 `jepa_checkpoints/pretrain_aux_w07/`、`jepa_eval_results/{B_probe_aux, Bp_ft_mirror_aux}/`，产物互不覆盖 |
 | 训练中监控 | TB/CSV 的 `Loss/aux_train_epoch` 应持续下降（实测 0.637→0.329，未收敛）；`Val/explained_var` 与主任务指标解耦（本轮 0.9634 < 基线 0.978，但下游 +2.6pp，见 D31——下游为准） |
 
+### 第三轮：R4 均衡练习 + 时序块掩码（2026-09-27 新增，方案与实现见 D33）
+
+针对导师意见①（各模态组合都要提升）的根因 ②（练习分布不均）与 ③（掩码无结构）：**子集 7 路轮巡**（每组合等频练习，替代 iid 抽取——keep_probs 在此配置下退役）+ **时序连续块掩码**（连续 4 token × 2 块 = 25%，替代均匀随机 token 掩码，JEPA-MSAC/WiFi-JEPA 手段）；保留辅助损失与 WiFi0.7 表被轮巡取代。
+
+| ID | run 名 | 目的 | 关键参数 | 预计时长 | 状态 | macro / worst / all（回填） |
+|:--|:--|:--|:--|:--|:--|:--|
+| R4.1 | `pretrain_r4_balanced` | 预训练：均衡子集轮巡 + 时序块掩码 + aux | `jepa_pretrain.py --config configs/jepa_aux_r4.yaml --run-name pretrain_r4_balanced` | ~2h | ✅ 完成 | val_loss 0.0181 / expl_var 0.9653（与健康基线同形）；轮巡生效（freq_* 见 D35）；aux 0.640→0.309 |
+| R4.2 | `B_probe_r4` | 探测：对照 R3.2（macro 0.6156），判定门 macro>0.6264 且 mmWave+RFID 恢复 | `jepa_downstream.py --method jepa_linear_probe --pretrained .../pretrain_r4_balanced/epoch_100.pth` | ~1h | ✅ 完成 | 0.6016 / 0.3489 / 0.6498 |
+| R4.3 | `Bp_ft_mirror_r4` | 微调 mirror 配方：判定门 macro>0.7426（超 R3.3）且 7 子集全部 ≥ A' | `jepa_downstream.py --method jepa_finetune --config configs/eval_methods_mirror.yaml --pretrained .../pretrain_r4_balanced/epoch_100.pth` | ~2h | ✅ 完成 | **0.7410 / 0.4133 / 0.8930** |
+
+### 第三轮判定结果（2026-09-28，详细分析见 D35）
+
+| 模态子集 | A_off 官方 | A' 自训 | R3.3 aux（第二轮） | **R4.3 均衡+块掩码** | R4.3−A' | R4.3−A_off |
+|:--|:--|:--|:--|:--|:--|:--|
+| mmWave | **0.8402** | 0.8108 | 0.8309 | 0.8323 | +2.2pp | −0.8pp |
+| WiFi | 0.5606 | 0.5623 | 0.6630 | **0.6606** | **+9.8pp** | **+10.0pp** |
+| RFID | **0.4242** | 0.3917 | 0.4141 | 0.4133 | +2.2pp | −1.1pp |
+| mmWave+WiFi | 0.8820 | 0.8909 | **0.8920** | 0.8870 | −0.4pp | +0.5pp |
+| mmWave+RFID | **0.8630** | 0.8345 | 0.8426 | 0.8570 | +2.3pp | −0.6pp |
+| WiFi+RFID | 0.5800 | 0.6365 | **0.6589** | 0.6435 | +0.7pp | **+6.4pp** |
+| 全模态 | 0.8947 | 0.8870 | **0.8964** | 0.8930 | +0.6pp | −0.2pp |
+| **worst-subset** | **0.4242** | 0.3917 | 0.4141 | 0.4133 | +2.2pp | −1.1pp |
+| **macro 平均** | 0.7207 | 0.7162 | **0.7426** | 0.7410 | **+2.5pp** | **+2.0pp** |
+
+**判定**：R4 = R3.3（macro 差 0.16pp，噪声内打平）——**判定门"macro>0.7426"未过，probe 门也未过（0.6016 < 0.6264；mmWave+RFID 0.5753 仍未恢复）**。两轮不同预训练配方收敛到同一平台（macro ~0.74），表明**"仅预训练融合层（12.4M）+ 同分布数据"的天花板已到**。轮巡与块掩码的价值：消除了练习不均的方差源（原则性保留为默认），但未带来额外性能。
+
+### 第三轮完整命令（复制即用）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+# R4.1 预训练（~2h）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_pretrain.py \
+    --config configs/jepa_aux_r4.yaml --run-name pretrain_r4_balanced
+# R4.2 探测（~1h）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_downstream.py \
+    --method jepa_linear_probe --dataset ../data/XRF55_Dataset_split \
+    --pretrained ./jepa_checkpoints/pretrain_r4_balanced/epoch_100.pth --run-name B_probe_r4
+# R4.3 微调 mirror 配方（~2h）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_downstream.py \
+    --method jepa_finetune --config configs/eval_methods_mirror.yaml \
+    --dataset ../data/XRF55_Dataset_split \
+    --pretrained ./jepa_checkpoints/pretrain_r4_balanced/epoch_100.pth --run-name Bp_ft_mirror_r4
+```
+
+| 部分 | 含义 |
+|:--|:--|
+| `--config configs/jepa_aux_r4.yaml` | R4 预训练变体：`mask.subset_schedule: balanced`（7 路轮巡，每 epoch 内洗牌顺序；`modality_keep_probs` 在此模式下退役）+ `mask.token_mode: block`、`mask.block_len: 4`（连续 4 token × 2 块 = 25% 覆盖）+ 保留 `aux_loss`（λ0.5/ramp5/LN both） |
+| 判定门 | R4.2：macro>0.6264 且 mmWave+RFID ≥0.75；R4.3：macro>0.7426 且 7 子集全部 ≥ A'（0.7162 基准）与 A_off（逐子集对照 §6 表） |
+| 训练中监控 | CSV 的 `freq_*` 列应≈各 1/7（0.143）——这是轮巡生效的直接证据；`token_mask_rate` ≈0.25；aux 持续下降 |
+
+### 第四轮：① 数据扩展（22000 语料）+ ② 微调步数预算（2026-09-27 已实现/配置，待跑）
+
+| ID | run 名 | 目的 | 关键参数 | 预计时长 | 状态 | macro / worst / all（回填） |
+|:--|:--|:--|:--|:--|:--|:--|
+| R4.4 | `pretrain_aux_22000` | ① 数据扩展：R3.3 配方（aux+WiFi0.7）+ train+test 无标签语料 22000（+43%） | `jepa_pretrain.py --config configs/jepa_aux_22000.yaml --run-name pretrain_aux_22000` | ~2.9h | ✅ 完成 | val_loss 0.0142 / expl_var 0.9734（**优于 w07 的 0.0192/0.9634**——数据杠杆在 SSL 层亦生效） |
+| R4.5 | `B_probe_aux22000` | 新语料表征探测 | `--method jepa_linear_probe --pretrained .../pretrain_aux_22000/epoch_100.pth` | ~1h | ✅ 完成 | **0.7251** / **0.5041** / 0.7509（探针门通过；vs 只用 train 语料的 0.6156 = **+11pp**） |
+| R4.6 | `Bp_ft_mirror_aux22000` | 新语料 + mirror 微调：**总判定** vs R3.3（0.7426）与 A'（0.7162）/A_off（0.7207） | `--method jepa_finetune --config configs/eval_methods_mirror.yaml --pretrained .../pretrain_aux_22000/epoch_100.pth` | ~2h | ✅ 完成 | **0.7634 / 0.4386 / 0.8918** |
+| R5.1 | `Bp_ft_mirror_b64` | ② 步数预算：mirror 配方 batch 512→64（3.1K→24.1K 步），检验 mmWave 系差距是否步数问题 | `--method jepa_finetune --config configs/eval_methods_b64mirror.yaml --pretrained .../pretrain_aux_w07/epoch_100.pth` | ~8h | ✅ 完成 | 0.7350 / 0.3965 / 0.8902 |
+
+判定门：**R4.6 = 0.7634 ≥ 0.7426 → 通过（+2.1pp over R3.3）**；R4.5 探针门通过（0.7251 > 0.6264）；R5.1 步数假说**证实**（详见 D38）。
+
+### 第四轮判定结果（2026-09-28，完整分析见 D38）
+
+| 模态子集 | A_off 官方 | A' 自训 | R3.3 第二轮 | R5.1 b64(旧pretrain) | **R4.6 22000语料** | R4.6−A' | R4.6−A_off |
+|:--|:--|:--|:--|:--|:--|:--|:--|
+| mmWave | **0.8402** | 0.8108 | 0.8309 | 0.8170 | 0.8395 | +2.9pp | −0.1pp |
+| WiFi | 0.5606 | 0.5623 | 0.6630 | 0.6677 | **0.7395** | **+17.7pp** | **+17.9pp** |
+| RFID | 0.4242 | 0.3917 | 0.4141 | 0.3965 | **0.4386** | **+4.7pp** | +1.4pp |
+| mmWave+WiFi | 0.8820 | 0.8909 | 0.8920 | 0.8998 | **0.9088** | +1.8pp | **+2.7pp** |
+| mmWave+RFID | **0.8630** | 0.8345 | 0.8426 | 0.8042 | 0.8368 | +0.2pp | −2.6pp |
+| WiFi+RFID | 0.5800 | 0.6365 | 0.6589 | 0.6698 | **0.6885** | **+5.0pp** | **+10.9pp** |
+| 全模态 | **0.8947** | 0.8870 | **0.8964** | 0.8902 | 0.8918 | +0.5pp | −0.3pp |
+| **worst-subset** | 0.4242 | 0.3917 | 0.4141 | 0.3965 | **0.4386** | **+4.7pp** | **+1.4pp** |
+| **macro 平均** | 0.7207 | 0.7162 | 0.7426 | 0.7350 | **0.7634** | **+4.7pp** | **+4.3pp** |
+
+**总目标复核**：vs A' = **7/7 子集全胜**（首次全扫描）；vs A_off = 4 胜（WiFi +17.9 / WiFi+RFID +10.9 / mmWave+WiFi +2.7 / RFID +1.4）2 平（mmWave −0.1 / 全模态 −0.3）1 负（mmWave+RFID −2.6）；**worst-subset 0.4386 首次超过 A_off（0.4242）——最后一块短板（RFID-only）已攻克**。macro 0.7634 创全部组别新高。
+
+### 第五轮（组合实验）：两个 winning 因子尚未合并
+
+R4.6（22000 语料 + b512/3.1K 步）与 R5.1（旧语料 + b64/24.1K 步）各自验证了一个因子；**合并 run** 是当前最直接的增量来源：
+
+| ID | run 名 | 组合 | 预计时长 | 状态 |
+|:--|:--|:--|:--|:--|
+| R5.2 | `Bp_ft_mirror_b64_aux22000` | `--config configs/eval_methods_b64mirror.yaml --pretrained ./jepa_checkpoints/pretrain_aux_22000/epoch_100.pth --run-name Bp_ft_mirror_b64_aux22000`（其余同 §7 第四轮命令块） | ~8h | ✅ 完成 |
+
+### 第五轮判定结果（2026-09-29，分析见 D39）
+
+| | macro | worst | all | WiFi | mmWave+RFID |
+|:--|:--|:--|:--|:--|:--|
+| R4.6（22000 语料 + b512/3.1K 步） | **0.7634** | **0.4386** | **0.8918** | **0.7395** | **0.8368** |
+| R5.2（22000 语料 + b64/24.1K 步） | 0.7266 | 0.3991 | 0.8645 | 0.6889 | 0.7818 |
+| R5.1（旧语料 + b64/24.1K 步） | 0.7350 | 0.3965 | 0.8902 | 0.6677 | 0.8042 |
+
+**判定：两因子不可加——R5.2 比两个单因子都差（vs R4.6 −3.7pp、vs R5.1 −0.8pp），R4.6 仍是冠军。** 机理（D39）：24.1K 步的持续 CE 适配会**侵蚀** 22000-aux 表征的结构（类灾难性遗忘），而对旧表征反而有益——步数预算的"最优值"依赖于预训练表征的丰富度，不是越大越好。b64 路线就此证伪封存。
+
+### 第四轮完整命令（复制即用）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+# ① 数据扩展
+# R4.4
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_pretrain.py \
+    --config configs/jepa_aux_22000.yaml --run-name pretrain_aux_22000
+# R4.5
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_downstream.py \
+    --method jepa_linear_probe --dataset ../data/XRF55_Dataset_split \
+    --pretrained ./jepa_checkpoints/pretrain_aux_22000/epoch_100.pth --run-name B_probe_aux22000
+# R4.6
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_downstream.py \
+    --method jepa_finetune --config configs/eval_methods_mirror.yaml \
+    --dataset ../data/XRF55_Dataset_split \
+    --pretrained ./jepa_checkpoints/pretrain_aux_22000/epoch_100.pth --run-name Bp_ft_mirror_aux22000
+# ② R5.1 步数预算（~8h，可与 ① 的下游并行跑另一张卡）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_downstream.py \
+    --method jepa_finetune --config configs/eval_methods_b64mirror.yaml \
+    --dataset ../data/XRF55_Dataset_split \
+    --pretrained ./jepa_checkpoints/20260918_135302_b512_lr5e-4_100ep/epoch_100.pth --run-name Bp_ft_mirror_b64
+# R5.2 Bp_ft_mirror_b64_aux22000
+CUDA_VISIBLE_DEVICES=0 conda run -n xfi --no-capture-output python jepa_downstream.py \
+    --method jepa_finetune --config configs/eval_methods_b64mirror.yaml \
+    --dataset ../data/XRF55_Dataset_split \
+    --pretrained ./jepa_checkpoints/pretrain_aux_22000/epoch_100.pth --run-name Bp_ft_mirror_b64_aux22000
+```
+
+| 部分 | 含义 |
+|:--|:--|
+| `configs/jepa_aux_22000.yaml` | ① 的预训练变体：R3.3 配方（aux + keep [0.5,0.7,0.5]）+ `data.include_test_split: true`（corpus 21230 train / 770 val，val 仅从 train 部分划）；**协议披露**：test 输入无标签参与预训练，写论文时注明 |
+| `configs/eval_methods_b64mirror.yaml` | ② 的微调变体：mirror 配方 + `data.train_batch_size: 64`（步数 3.1K→24.1K） |
+| `--pretrained`（②） | 步数实验的初始化用**原 R3.3 同款预训练权重**（20260918 归档 run），保证与 R3.3/Bp_ft_mirror 只差 batch——单变量对照 |
+
+## 8. R6/R7 计划（2026-09-27，本轮只计划、不改码——人工指示）
+
+### 8.1 R6：从论文照片复原 4 个 Scene 的 floorplan（可行性调查结论）
+
+> **范围修正（2026-09-27 人工指示）**：floorplan = 房间**平面图**（非 3D 模型），只含**墙、柱**等房间结构，**不含家具**；设备布局只关注**收集 CSI 的设备（WiFi TX/RX Intel 5300）**，其他模态设备不管；**只关注平面位置，不含高度**。此修正大幅简化复原：设备布局 = "矩形感知区四角的 4 台 Intel 5300 位置 + 朝向"（论文 §3.1：1 TX + 3 RX 位于矩形四角，笔记本高 1.2m 的高度信息弃用），Scene 3 照片的红色标注含笔记本间距离 → 矩形边长可直接恢复。房间多边形只描墙体与立柱（Scene 4 有立柱），跳过衣柜/窗帘等家具。
+
+
+
+**信息盘点（读 3643543.pdf 实测）**：Fig. 2（p21:6）为 4 张场景照片（含设备标签：mmWave 雷达/WiFi TX+RX/RFID 天线/RIS 128×128 面板）；图注与 §3.1 明确两点关键事实——**① 设备相对摆放与朝向跨 4 个场景保持一致；② 相对摆放（设备间距离）在 Scene 3 照片上用红色标注**。此外论文给出设备高度（WiFi 笔记本 1.2m、RFID 天线-标签阵 40cm）。Scene 4 有立柱，Scene 1 有衣柜/窗帘等家具（房间外壳差异的主体）。
+
+**可行性结论**：
+- ✅ **设备布局图（场景先验通道最需要的部分）——高置信可行**：以 Scene 3 的距离标注为约束做三角化/MDS，重建设备 2D 相对坐标 + 朝向；由于布局跨场景一致，Scene 3 的标定可直接服务 4 个场景；
+- ⚠️ **房间外壳（墙体多边形）——中置信可行**：从照片手绘近似多边形（单视角、广角畸变、无绝对尺度 → 误差 ±0.5~1m）；以 Scene 3 标定比例 + 门/窗/立柱做参照可收敛到"布局指纹"级别；
+- ❌ **精确建筑级按比例 floorplan——不可行**（照片无法提供全屋尺度标定）。
+
+**复原方法（建议流程）**：
+1. Scene 3 照片提取红色距离标注 → 以一台 mmWave 雷达为原点，MDS/最小二乘三角化全部设备 2D 坐标 + 朝向（**共享布局**，一次重建四场景通用）；
+2. 四张照片手绘房间多边形（含立柱/家具/门窗），以第 1 步的比例标定对齐 → 4 份近似 floorplan（矢量：墙体线段列表）；
+3. 产出格式：每场景 JSON `{room_polygon: [...], devices: [{type, xy, yaw}]}`；编码方案 A=64×64 占用/语义栅格 + 设备位置热图 → 小 CNN；方案 B=多边形+设备坐标 → 坐标 MLP/点云编码器（JEPAREADME §8-1 的预留接口：场景先验作为第 4 模态走同一 projector→X_Fusion 通路）。
+
+**工作量**：人工手绘+标注 ~0.5-1 天；编码器实现 1-2 天。
+
+**实验设计要点（成色保障）**：必须对照 **one-hot scene-id 基线**（4 类，零成本）——若 floorplan 先验不显著优于 one-hot，说明模型只在做场景查表，创新点不成立；另做 leave-one-scene-out 与布局扰动鲁棒性实验。风险评估：几何误差 ±0.5m 对"场景指纹"用途可接受，对精确定位类任务不可接受。
+
+### 8.2 R7：MM-Fi 多数据集/多任务下游评测
+
+> **M2 格式审计结果（2026-09-27 完成，数据已链接 `data/MMFi_Dataset -> /mnt/DataDrive164/wr/MMFi_Dataset`）**：结构 = E01-E04 环境 × S01-S10 受试者 × A01-A27 动作 × 每动作一段记录（实测 E01/S02/A14 为 297 帧）× 逐帧文件。**WiFi CSI**：每帧 `.mat` 含 `CSIamp (3, 114, 10)` + `CSIphase (3, 114, 10)` float64——3 天线 ✓（与 XRF55 天线数一致）但 **114 子载波 × 10 包**，与 Intel 5300 的 270 通道（30 子载波）**不同构**，需输入适配层（如包平均 + 114→30 子载波重采样，或 1×1 Conv 342→270 通道适配）；**mmWave**：每帧 `.bin` 仅 920 字节的 TI 原始 ADC（IWR6843 与 XRF55 同款雷达但采集配置不同）——需 MM-Fi 官方预处理流程重建 Range-Doppler/Angle 图再重采样到 (17,256,128)，工作量大于 WiFi 路径；**标签红利**：`ground_truth.npy (297, 17, 3)` 为逐帧 17 关键点 3D 人体骨架（Kinect）——**多任务扩展（HPE）的数据是现成的**，验证了 §8.2 原判断。帧级 vs XRF55 样本级（1 秒切片）的时序聚合策略需设计（均匀帧池化 / 滑窗 + 投票）。
+
+
+**重要事实修正**：XRF55 论文 Table 1（p21:4）记录 **MM-Fi 数据集本身包含 Wi-Fi CSI**（模态：WiFi/mmWave/RGB+D/LiDAR，40 subjects）——此前"MM-Fi 无 WiFi 模态"的判断只对 X-Fi 官方仓库的**代码**成立（MMFi_HAR/MMFi_HPE 无 WiFi 分支），对**数据集**不成立。⇒ 多数据集 WiFi 评测可行，且能保留我们最关心的 WiFi 通道。
+
+**方案（分里程碑）**：
+- M1 数据获取（人工）：MM-Fi 官方 GitHub（ybhbingo/MMFi_dataset）按模态/任务下载子集（全集大；先下 WiFi CSI + mmWave + 动作标签）；
+- M2 格式审计（关键风险）：核对 MM-Fi 的 WiFi CSI 设备/协议/维度（MM-Fi 论文与 XRF55 的 Intel 5300 30 子载波是否同构）与 mmWave 数据布局（XRF55 为 (17,256,128) 距离-多普勒/角度拼接图；MM-Fi 若为原始 ADC/其他 FFT 布局则不兼容，需重预处理或放弃 mmWave 只做 WiFi）；
+- M3 新加载器：`MMFi_Dataset.py`（新文件，镜像 `XRF55_Dataset` 接口；**不改动** XRF55_Dataset.py）；类空间 MM-Fi HAR = 27 类 → `classification_Head(512, 27)`；
+- M4 评测协议（两档）：① **迁移探测**——冻结全部，只训头（检验跨数据集表征迁移，JEPA 的主战场）；② **微调**——projector+X_Fusion+头（mirror 配方）；对照组 = 原版 X-Fi 同数据同预算训练（scratch 对照）；
+- M5 判定：JEPA 初始化 vs scratch 在 MM-Fi 上的宏平均/逐子集差；预期 WiFi 子集优势最大（XRF55 预训练已含 WiFi 表征）；
+- M6 多任务扩展（后续）：MM-Fi 支持 HPE/定位等，README §7-4 的任务头并列接口可承接。
+
+**风险**：WiFi 设备/协议差异（Intel 5300 vs MM-Fi 所用网卡）导致 CSI 不可直接同构——若差异大，退化为"仅 mmWave 跨数据集"或需域自适应；MM-Fi 受试者划分协议（S1 测试）需遵循其论文。
+
+### 8.3 待人工决策
+
+① R6 手绘标注是否开工（~0.5-1 天人工）；② R7 M1 数据下载是否启动；③ 第四轮（§7）与 R6/R7 的执行顺序。
+
 ### 判定门
 
 1. **R1 门**（对照 A' macro 0.7162）：**R1.1 mirror = 0.7171 ≥ 0.7162 → 通过**（worst +1.7pp、mmWave+RFID +1.2pp；幅度在噪声边缘但方向一致）。**采纳 mirror 配方为后续 finetune 默认**。R1.2 为否定性结果：wd 0.05 + cosine 在 lr 1e-4 下**损害**预训练特征（WiFi 0.4108、best-by-val 停在 epoch 12/100）——JEPA 初始化的微调对配方敏感，恒定低 wd 是正确配方。
@@ -436,3 +614,21 @@ CUDA_VISIBLE_DEVICES=<卡1> conda run -n xfi --no-capture-output python jepa_dow
   - **判定门一过一不过，且解耦有信息量**：R3.3 门过（macro/worst 双达标）；R3.2 探测门未过（0.6156 < 0.6264，mmWave+RFID 0.5585 未恢复）——辅助损失塑造的是"微调后可利用"的跨模态结构而非线性可读结构，probe 与 finetune 解耦（probe −1.1pp、finetune +2.6pp）。含义：评测 JEPA 预训练价值应以微调为准，线性探测会低估（与 §6 备注一致）。
   - **主 SSL 指标略降但下游更优**：R3.1 的 val_loss 0.0192 / expl_var 0.9634 弱于基线 run 的 0.0117 / 0.978——辅助目标占用了部分表征容量；但换来的跨模态结构在微调后净收益 +2.6pp。"SSL 验证指标更好 ≠ 下游更好"，后续判定以下游为准、SSL 指标仅作健康监控。aux_loss 0.637→0.329 仍在下降（未收敛，加长训练或仍有空间）。
   - **剩余短板与下轮候选**：① worst-subset（RFID-only 0.4141）仍低于 A_off 0.4242——RFID 是最后未攻克的子集；② R3.4 消融（aux+w0.9）分离掩码表与辅助损失的贡献；③ 数据扩展（train+test 22000，~2.9h）；④ aux λ 扫描（1.0）或 aux 收敛后加长预训练。均未排期，等人工决策。
+- **D32 导师反馈与改进路线图（2026-09-23，小组会）**：导师三点意见——① R3.3 相比原版增益不够（期望**各任务、各模态组合全面提升**，目前仅特定组合有优势）；② 基础模型需**多任务/多数据集**评价（目前仅 XRF55 HAR）；③ **floorplan 未引入**（创新点之一，后续工作）。参考论文与可借鉴点映射：CSI-JEPA（信道变化强度**感知掩码**；冻结+轻量适配器 7 任务 +10.64pp/标签节省 98%）；WiFi-JEPA（**整链路结构化掩码**迫跨链路推理；其"视觉原生 SSL 目标不及从零训练"的反例与我们观察一致）；JEPA-MSAC（统一词元空间 + **时序块掩码**；冻结骨干+轻量头多任务）；LatentWave（**逐通道 patch + 随机通道采样**；反对低层重建目标）；WWM/WirelessJEPA 已排除（点云射线追踪/原始 IQ）。**根因分析**（为什么未全面胜出）：① 预训练的"练习分布"不均衡——模态子集按 iid 采样，组合练习次数方差大，部分组合欠训练；② 掩码无结构信息——均匀随机 token 掩码 + 固定模态概率，未利用 CSI 时序结构与信道信息量（论文的核心手段）；③ 步数预算不对等——A_off 为 batch16×100ep=96K 步，我们 batch512=3.1K 步，mmWave 系子集的劣势与 A'（同为 b512）一致，提示步数因素；④ 数据无杠杆——预训练语料=训练集本身；⑤ 评价维度单一（仅 HAR 全标签）。**分轮路线**：R4 均衡练习+结构化掩码（子集分层轮巡替代 iid、时序块掩码、保留 aux）→ R5 微调步数预算（batch 64/16 mirror）+ 适配器对照 → R6 floorplan/场景先验通道（JEPAREADME §8-1 预留接口，创新点）→ R7 标签效率曲线（1%/5%/10%/25%）与多任务扩展（顾问意见②的正面回应）。
+- **D33 第三轮实现：R4 均衡练习 + 时序块掩码（2026-09-27，人工批准"一项一项来做"）**：针对 D32 根因 ②③。① `mask.subset_schedule: balanced`——子集 7 路轮巡（每 epoch 内 mask_rng 洗牌顺序，batch i 取 `SUBSET_BOOLS[cycle_order[i % 7]]`），**各组合等频练习**（替代 iid 抽取，`modality_keep_probs` 在此模式退役）；② `mask.token_mode: block` + `block_len: 4`——连续 4 token × 2 块（round(32×0.25/4)=2 块，不重叠起点）替代均匀 iid token 掩码（JEPA-MSAC 时序块 / WiFi-JEPA 结构化掩码手段），块起点 `mask_rng.permutation(29)[:2]`；③ aux 损失保留（均衡轮巡使每个缺席模态的辅助目标获得等频练习——与轮巡协同）。**人工决策记录**：R4 先行、R5 等 R4 结果；**R6 受阻——XRF55 未提供 floorplan**（数据事实，已核实），floorplan 式场景先验不可行，场景 id 版先验存疑待议；**R7 重心改定义为"在多样的数据集和/或多样的任务上做下游微调"**（目前仅 XRF55+HAR，不满足基础模型评价——需新数据/新任务获取决策，如 XRF55 定位任务需位置标签核实）。冒烟（3+3 batch × 2 epoch）：轮巡频率每组合 33-67%（6 batch/7 组合的预期分布）、块掩码 rate 0.237≈0.25、aux 0.640 正常。实验行见 §7 第三轮表 + 完整命令。
+- **D34 checkpoint 选择分析：为什么下游用 epoch_100 而非 best_val.pth（2026-09-27，人工提问触发）**：人工问为何命令都用 epoch_100。用 pretrain_aux_w07 的数据回答——**SSL 验证指标存在"选择偏向低信息量检查点"的缺陷**：val_loss 于 ep13 最低（0.00715）、val_expl_var 于 ep13 最高（0.9858），best_val.pth 因此记录的是 ep12/13 权重；但同期 z_tgt 跨样本 std 仅 ~0.19（ep100 为 0.91）——低 val loss = 表征"容易预测"= 跨样本信息量低，而下游判别力恰恰需要跨样本信息。R3.3 从 ep100 出发取得 +2.6pp，佐证末段丰富表征才是正确选择（EMA momentum→1.0，末段编码器最平滑收敛）。**结论：① 下游默认 epoch_100（= last.pth）；② best_val.pth 降级为诊断产出（记录"表征何时最可预测"，不是推荐检查点）；③ 可选实证（~1h）：对 ep12 的 best_val 跑探针对比 ep100（预期明显更差）。**待办池新增：checkpoint 选择判据修正（如 val loss + 跨样本 std 组合，或小探针选点）。另：20260918 归档 run 无 best_val 机制，D24 事后甄别即为其 epoch_100 的依据——与本次结论一致。
+- **D35 第三轮结果与结论（2026-09-28，人工执行，结果目录 `jepa_checkpoints/pretrain_r4_balanced`、`jepa_eval_results/{B_probe_r4, Bp_ft_mirror_r4}`）**：
+  - **机制验证**：轮巡生效——7 子集抽取严格等频（freq 列恒定，如 mmWave+RFID 恒 0.276/0.31，all 恒 0.138-0.172）；块掩码 rate 0.237≈0.25；无塌缩（z_tgt std 0.19→0.90）；主 SSL val 曲线同形（min 0.00775@ep9 → 0.0181@ep100，D34 的选点问题在 R4 依旧存在）。
+  - **判定门**：R4.3 macro 0.7410 vs 门 0.7426——**未过，但与 R3.3 打平（−0.16pp，噪声内）**；6/7 子集 ≥ A'（mmWave+WiFi −0.4pp 为唯一例外）。probe 门未过（0.6016 < 0.6264，mmWave+RFID 0.5753）。
+  - **核心结论：天花板到达**。两轮独立配方（R3.3 aux+wifi0.7 vs R4 轮巡+块掩码）微调后 macro 收敛于 0.741-0.743、probe 收敛于 0.60-0.62——**"仅预训练融合层（12.4M 参数）+ 同分布 15400 样本"这一设定的性能上限已到**。轮巡与块掩码按设计工作（消除练习不均、结构化掩码）但未转化为增量，说明信息瓶颈不在掩码策略，而在：① 可学习的参数盘子太小（extractor 20.55M 冻结）；② 数据无杠杆（预训练语料 = 训练集）。
+  - **对导师意见①的现状回答**：R4.3 vs A' = 全 7 子集中 6 个领先（macro +2.5pp）；vs A_off = macro +2.0pp，WiFi 系大幅领先（+10.0/+6.4pp），mmWave 系与 RFID 系仍小幅落后（−0.6 ~ −1.1pp）——"部分组合有优势、部分组合略差"的格局未变。
+  - **下一轮候选（等人工决策，均需新代码或新数据）**：① 数据扩展——train+test 无标签 22000（方案在 D28/D31 备案，未实现）；② 部分解冻 extractor 末层微调（架构偏离协议，需人工拍板）；③ R3.4 消融（配置/命令已就绪）；④ few-shot 曲线补 1%/5%（探针口径 ~1h）；⑤ 微调步数预算实验（batch 64 mirror，~8h，检验 mmWave 系差距是否步数问题——A_off 96K 步 vs 我们 3.1K 步）。
+- **D36 第四轮实现 + R6/R7 计划（2026-09-27，人工批准"①+② 并行，R6/R7 只计划"）**：① **数据扩展已实现并冒烟通过**：`jepa_pretrain.py` 新增 `data.include_test_split`（ConcatDataset，索引空间 train[0,15400)+test[15400,22000)），**val 始终只从 train 部分划**（test 数据不触碰 val/test 标签语义）；冒烟实测 corpus 21230 train / 770 val，aux 块正常；协议披露已写进日志行与 config 注释（test 输入无标签参与预训练）。变体 `configs/jepa_aux_22000.yaml`（R3.3 配方 + 22000 语料，单变量对照 R3.1）。② **步数预算实验配置**：`configs/eval_methods_b64mirror.yaml`（mirror 配方 + batch 512→64，步数 3.1K→24.1K，单变量对照 Bp_ft_mirror 与 A_off 的 96K 步）。第四轮实验表与完整命令见 §7（R4.4-R4.6 + R5.1）。**R6 调查结论**（读 3643543.pdf）：Fig.2 四场景照片 + Scene 3 红色相对距离标注 + 图注"设备相对摆放跨场景一致"——设备布局图高置信可复原（MDS/三角化），房间外壳中置信（手绘近似 ±0.5-1m），精确建筑级不可行；**但场景先验通道需要的正是"设备布局 + 粗房间指纹"，可行性成立**；方案/编码/实验设计（含 one-hot 对照防"场景查表"退化）见 §8.1；前置工作为人工手绘标注 ~0.5-1 天。**R7 计划**（§8.2）：重要事实修正——XRF55 论文 Table 1 记录 **MM-Fi 含 WiFi CSI**（此前"MM-Fi 无 WiFi"仅对 X-Fi 官方仓库代码成立）；六里程碑方案（M1 下载→M2 格式审计→M3 加载器→M4 两档协议→M5 判定→M6 多任务）；关键风险 = WiFi 设备/协议差异与 mmWave 数据布局。§8.3 列了三个待人工决策点。
+- **D37 R6 范围修正 + R7 审计完成（2026-09-27，人工指示）**：① **R6 范围收窄**（人工指示）：floorplan = 2D 平面图（墙+柱，无家具）；设备布局只含 CSI 收集设备（WiFi TX/RX Intel 5300，矩形四角 4 台）、只记平面位置。简化后设备布局先验 = "感知矩形四角 + 朝向"（Scene 3 标注直接给出边长），复原难度进一步下降。② **R7 M2 审计完成**（数据已链接 `data/MMFi_Dataset -> /mnt/DataDrive164/wr/MMFi_Dataset`）：结构 E01-E04 × S01-S10 × A01-A27 × 逐帧文件；WiFi CSI 每帧 `.mat` = `CSIamp/CSIphase (3,114,10)`——**3 天线一致但 114 子载波×10 包，与 Intel 5300（30 子载波）不同构**，需输入适配（包平均+子载波重采样或 342→270 Conv）；mmWave 每帧 `.bin` 920 字节 TI 原始 ADC（IWR6843 同款雷达、不同采集配置）→ 需官方预处理重建热图后重采样，工作量大于 WiFi 路径；**ground_truth.npy (297,17,3) = 逐帧 17 关键点 3D 骨架** → HPE 多任务数据现成。③ R7 里程碑更新：M1/M2 完成；M3 加载器 + 时序聚合策略（帧池化/滑窗）为下一步实现项（等人工下令）；M4 协议两档不变。
+- **D38 第四轮结果与结论（2026-09-28，人工执行，结果目录 `jepa_checkpoints/pretrain_aux_22000`、`jepa_eval_results/{B_probe_aux22000, Bp_ft_mirror_aux22000, Bp_ft_mirror_b64}`）**：
+  - **① 数据杠杆证实（本轮最大收益）**：22000 语料使 SSL 验证指标本身改善（0.0142/0.9734 优于 train-only 的 0.0192/0.9634），下游三处跳变——probe macro 0.6156→**0.7251**（+11pp，探针门首次通过）；微调 macro 0.7426→**0.7634**；**vs A' 7/7 子集全胜**、vs A_off 4胜2平1负、**worst-subset 0.4386 首次超过 A_off（RFID-only 短板攻克）**。WiFi-only **0.7395**（vs A_off +17.9pp）创单子集最大领先。
+  - **② 步数假说证实（作为混杂因子）**：同预训练同配方，batch 512→64（步数 ×8）使 macro 0.7171→0.7350（+1.8pp）、WiFi 0.5561→0.6677（+11.2pp）——**此前所有微调数字都被 3.1K 步的低适应预算压低了**（含 D25-D27 的 B' 系列）。但 mmWave vs A_off 仍 −2.3pp（24K 步未完全追平 96K 步）→ mmWave 的剩余差距 = 步数 + 其他因素（可能含 batch 统计量效应）。
+  - **两个因子的量级**：数据缩放 +2.1pp > 步数 +1.8pp（各自相对控制组），且**尚未合并**——R5.2（aux22000 预训练 + b64 微调）已排入 §7 第五轮，预期 ≥0.76。
+  - **mmWave+RFID 仍是唯一未过的子集**（R4.6 0.8368 vs A_off 0.8630，−2.6pp；且 b64 反而降到 0.8042）——该组合对步数负敏感，归因待查（可能 mmWave+RFID 组合依赖更充分的监督收敛）。
+  - **文档与叙事**：§6/§7 主表后续以 R4.6 为 JEPA 代表组；论文叙事三支柱=① 数据杠杆（+43% 无标签语料 → 全面提升）、② 步数/预算敏感性（SSL 初始化需配对预算才公平）、③ 标签效率曲线（待补 1%/5% 探针点）。D34 的"SSL val 指标偏向低信息检查点"在 22000 语料下依旧成立（val min @ep8）。
+- **D39 第五轮结果：因子不可加，R4.6 仍为冠军（2026-09-29，人工执行，结果目录 `jepa_eval_results/Bp_ft_mirror_b64_aux22000`）**：合并 run（22000 语料 + b64/24.1K 步微调）macro **0.7266**——比两个单因子都差（R4.6 0.7634 / R5.1 0.7350），全模态跌至 0.8645、WiFi 跌至 0.6889、mmWave+RFID 0.7818。**机理**：持续 24.1K 步的恒定 lr CE 适配会侵蚀 22000-aux 表征的结构（对 SSL 预训练结构的"过写"），而对旧 w07 表征反而有益（R5.1 +1.8pp）——**微调步数的最优值随预训练表征的丰富度变化，丰富表征需要更短的适应预算**。b64 路线就此证伪封存。**最终配方定格：pretrain_aux_22000（epoch_100）+ mirror 微调（b512 / 恒定 lr 1e-4 / wd 0.01 / 100 epochs / last-model）= macro 0.7634，vs A' 7/7 全胜（+4.7pp）、vs A_off macro +4.3pp 且 worst-subset 反超**。后续若再压榨：只剩探针选点（epoch_XXX 之间挑，~1h/点）、λ 扫描、或 extractor 部分解冻（需人工拍板架构偏离）。标签效率曲线（1%/5% 探针，R4.6 预训练）为论文核心图，建议优先补。
