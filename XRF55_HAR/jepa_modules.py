@@ -87,6 +87,20 @@ class AuxModalityHeads(nn.Module):
         return [self.heads[m](z_hat) for m in absent_idxs]
 
 
+@torch.no_grad()
+def ema_module(ema_mod, online_mod, m):
+    """EMA-blend `online_mod` into `ema_mod` with momentum m (params + float buffers;
+    integer buffers, e.g. BatchNorm num_batches_tracked, are copied). Shared by
+    EMATargetEncoder and csi_jepa.CSIEMATargetEncoder."""
+    for ema_p, online_p in zip(ema_mod.parameters(), online_mod.parameters()):
+        ema_p.mul_(m).add_(online_p.detach(), alpha=1.0 - m)
+    for ema_b, online_b in zip(ema_mod.buffers(), online_mod.buffers()):
+        if torch.is_floating_point(ema_b):
+            ema_b.mul_(m).add_(online_b, alpha=1.0 - m)
+        else:  # integer buffers, e.g. BatchNorm num_batches_tracked
+            ema_b.copy_(online_b)
+
+
 class EMATargetEncoder(nn.Module):
     """f_theta_bar: EMA copy of the online linear_projector + X_Fusion.
 
@@ -141,13 +155,7 @@ class EMATargetEncoder(nn.Module):
 
     @torch.no_grad()
     def _ema_module(self, ema_mod, online_mod, m):
-        for ema_p, online_p in zip(ema_mod.parameters(), online_mod.parameters()):
-            ema_p.mul_(m).add_(online_p.detach(), alpha=1.0 - m)
-        for ema_b, online_b in zip(ema_mod.buffers(), online_mod.buffers()):
-            if torch.is_floating_point(ema_b):
-                ema_b.mul_(m).add_(online_b, alpha=1.0 - m)
-            else:  # integer buffers, e.g. BatchNorm num_batches_tracked
-                ema_b.copy_(online_b)
+        ema_module(ema_mod, online_mod, m)  # shared implementation (csi_jepa reuses it)
 
     def forward_with_parts(self, mmwave_data, wifi_data, rfid_data):
         """Like forward(), but also returns the per-modality projected features (before the

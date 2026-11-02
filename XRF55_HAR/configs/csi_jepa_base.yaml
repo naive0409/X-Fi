@@ -1,0 +1,47 @@
+seed: 3407
+data:
+  root: ../data/XRF55_Dataset_split
+  batch_size: 512
+  num_workers: 4
+  val_split: 0.05
+  pin_memory: false
+  prefetch_factor: 2
+  include_test_split: true
+model:
+  channels: 270
+  time_steps: 1000
+  patch_c: 30        # = subcarriers of ONE RX link (audit_wifi_layout.py: 270 = 9 links x 30)
+  patch_t: 100       # 0.1 s time slice (lag-100 autocorrelation ~0.07-0.15)
+  dim: 256
+  depth: 8
+  num_heads: 4
+  ffn_dim: 1024
+  dropout: 0.0
+  input_norm: none   # 'channel_std' available (model-internal buffers); default off
+  predictor:
+    depth: 4
+    num_heads: 4
+    ffn_dim: 512
+    dropout: 0.0
+optim:
+  lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 10
+  epochs: 300
+ema:
+  base_momentum: 0.996
+mask:
+  token_mask_rate: 0.5
+  rect_c: 2
+  rect_t: 2
+  link_dropout_prob: 0.3
+log:
+  save_dir: ./csi_jepa_checkpoints
+  save_every_epochs: 25
+  log_masks_first_epoch: true
+_variant: "Phase A1 (PROJECT_LOG ⒀): unimodal task-agnostic CSI base. WiFi-JEPA-style\
+  \ structured tokenization of raw (270,1000) amplitude CSI -> 9x10=90-token grid ->\
+  \ 8-layer pre-LN ViT (~7.1M) trained FROM SCRATCH with JEPA (EMA target = full-encoder\
+  \ copy, predictor 2.2M). Replaces the HAR-supervised frozen extractor front-end. Grid\
+  \ masking: 2x2 rect blocks to ~0.5 + link dropout 0.3. Corpus: train+test unlabeled\
+  \ 22000 (disclosed). G1/G2 gates vs csi_scratch and A0 (jepa_aux_22000_wifi_only)."

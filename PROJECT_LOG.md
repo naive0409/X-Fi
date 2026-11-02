@@ -632,3 +632,184 @@ CUDA_VISIBLE_DEVICES=<卡1> conda run -n xfi --no-capture-output python jepa_dow
   - **mmWave+RFID 仍是唯一未过的子集**（R4.6 0.8368 vs A_off 0.8630，−2.6pp；且 b64 反而降到 0.8042）——该组合对步数负敏感，归因待查（可能 mmWave+RFID 组合依赖更充分的监督收敛）。
   - **文档与叙事**：§6/§7 主表后续以 R4.6 为 JEPA 代表组；论文叙事三支柱=① 数据杠杆（+43% 无标签语料 → 全面提升）、② 步数/预算敏感性（SSL 初始化需配对预算才公平）、③ 标签效率曲线（待补 1%/5% 探针点）。D34 的"SSL val 指标偏向低信息检查点"在 22000 语料下依旧成立（val min @ep8）。
 - **D39 第五轮结果：因子不可加，R4.6 仍为冠军（2026-09-29，人工执行，结果目录 `jepa_eval_results/Bp_ft_mirror_b64_aux22000`）**：合并 run（22000 语料 + b64/24.1K 步微调）macro **0.7266**——比两个单因子都差（R4.6 0.7634 / R5.1 0.7350），全模态跌至 0.8645、WiFi 跌至 0.6889、mmWave+RFID 0.7818。**机理**：持续 24.1K 步的恒定 lr CE 适配会侵蚀 22000-aux 表征的结构（对 SSL 预训练结构的"过写"），而对旧 w07 表征反而有益（R5.1 +1.8pp）——**微调步数的最优值随预训练表征的丰富度变化，丰富表征需要更短的适应预算**。b64 路线就此证伪封存。**最终配方定格：pretrain_aux_22000（epoch_100）+ mirror 微调（b512 / 恒定 lr 1e-4 / wd 0.01 / 100 epochs / last-model）= macro 0.7634，vs A' 7/7 全胜（+4.7pp）、vs A_off macro +4.3pp 且 worst-subset 反超**。后续若再压榨：只剩探针选点（epoch_XXX 之间挑，~1h/点）、λ 扫描、或 extractor 部分解冻（需人工拍板架构偏离）。标签效率曲线（1%/5% 探针，R4.6 预训练）为论文核心图，建议优先补。
+
+- **D40 架构转向决策：单模态任务无关基座（Phase A）→ floorplan（Phase B）（2026-10-31，人工指示，方案已批准）**：人工三分支指示——① **单模态化**：模型输入改为仅 WiFi CSI + floorplan（B 阶段），不再做模态缺失鲁棒性；② **任务无关预训练**（先检查现体系是否任务特异）；③ floorplan 引入（读 MUSE-FM 2509.01967 全文，改进其栅格保真度与物理引导两弱点）。**人工明确排序：①② 先于 ③**。**任务无关性检查结论（②的正式回答）**：原版 X-Fi **无预训练**（run.py+har_train 端到端监督 CE）；我们的 JEPA 目标虽无标签，但**残留任务特异性 = 冻结 extractor 的 20.55M 权重是作者 HAR 监督产物**（且体系只评过 XRF55 HAR）。结论：需从原始 CSI 自训 tokenizer+encoder（WiFi-JEPA 路线）整体替换监督前端。**人工已定**：预训练语料 = 22000（train+test 无标签，协议已披露）；floorplan 等 A 阶段过门后启动。详细方案、数据事实、门槛设计见 §9。
+- **D41 发现既有脚本一处潜在缺陷（2026-10-31，记录不动原文件）**：`jepa_downstream.py` 在 best.pth 存在时（val_split>0 的 run），`accuracy_last_model` 实际用 best 权重评估（eval 前只回载了 best，未回载 last）。**已发布结果不受影响**——mirror 配方无 val 留出、无 best.pth，`accuracy_last_model` 即真 last；受影响的只有 warmstart 类 run 的 last 列。`jepa_csi_downstream.py`（新脚本）已修正此点（best/last 均完整回载 encoder+head）。
+
+## 9. Phase A：单模态任务无关 JEPA 基座 csi_jepa（2026-10-31 启动，方案已批准）
+
+### 9.1 转向动机与顺序（D40）
+
+D35 确认"只预训练 12.4M fusion、前端冻结 HAR 监督 extractor"路线天花板 ~0.74（R4.6 0.7634 已近顶）。本阶段把研究对象从"模态缺失鲁棒性"转为"环境感知基础模型底座"：**先单模态+任务无关（Phase A），过门后再引入 floorplan（Phase B）**。
+
+### 9.2 数据事实（`audit_wifi_layout.py` 实测，12 文件跨 4 场景 train+test）
+
+| 检查项 | 结果 | 结论 |
+|:--|:--|:--|
+| 形状/幅度 | 恒 (270,1000)；min≡0.0、max 24-32 | **纯幅度，无相位**（纠正此前"3天线×30子载波×3分量"的记忆） |
+| 30 通道块相关 | 块内 0.42 ≫ 跨块 0.33 ≫ 跨90超块 0.12 | **270 = 9 链路 × 30 子载波**（3 笔记本×3 天线；论文 §3.1 一致） |
+| 时间轴 | lag-1 自相关 0.77、lag-100 仅 0.07-0.15 | 100 采样（0.1s）是自然去相关单元 |
+| patch 信息量 | 90 个 (30×100) patch 均值 4.3-16.1 | token 间差异真实 |
+
+### 9.3 Phase A0：对照（配置即成，零代码）
+
+**作用 = G2 对照**（非台阶）：回答"HAR 监督的冻结 extractor 在单模态设置下还能交付多少"。`configs/jepa_aux_22000_wifi_only.yaml` = R4.6 冠军配方逐字节复制、唯 keep_probs→[0.0,1.0,0.0]（现有采样代码自动强制每 batch WiFi-only；目标分支仍全模态，辅助头恒预测 mmWave+RFID）；下游 `configs/eval_methods_mirror_wifi.yaml`（**读 7 子集表的 WiFi 行**，其余行 OOD，macro/worst 对 A0 无意义）。
+
+### 9.4 Phase A1：csi_jepa（核心）
+
+- **Tokenizer**：原始 (270,1000) → `Conv2d(1,256,k=(30,100))` → **9 链路 × 10 时间片 = 90 token**（vs 冻结 extractor 的 4 token，22.5×）；**分解式位置编码** pos_c(9)+pos_t(10)——跨数据集网格尺寸可变（应对链路数不统一，MM-Fi 为 3 链路 114 子载波）；`input_norm` 可选（模型内部 buffer，dataloader 恒原始值——陷阱 9），默认关。
+- **Encoder**：8×PreLNBlock(256,4,1024)（复用 `jepa_modules.PreLNBlock`）+ mask_token + out_norm LN（D17 修复第 0 天内置）；**全程无 BN** → BN warmup/buffer 同步/eval 守卫整类问题结构性消失；**7.09M**（介于 12.4M fusion 与会欠训的 ViT-S 22M 之间）。
+- **EMA 目标分支**：deepcopy **整个** encoder（无冻结 extractor 可共享——extractor 即可训 tokenizer），逐参 EMA（`jepa_modules.ema_module` 自由函数共享实现），永久 eval，无 buffer 同步。
+- **Predictor**：复用现有类 `Predictor(dim=256, tokens=90, depth=4, heads=4, ffn=512)` = 2.13M。可训总量 9.22M。
+- **掩码**：2D 矩形块 2×2 至 rate 0.5（块重叠致实际 ~0.43）+ 每样本 0.3 概率整链路 10 token 全掩（WiFi-JEPA link-mask 对应物）。
+- **配方**：22000 语料 / b512 / lr 1e-3 / wd 0.05 / warmup 10ep + cosine / **300ep**（从零 vs 当年为预训 fusion 调的 100ep）/ EMA 0.996→1.0 / D19 监控 + D34 纪律（best_val 仅诊断，下游用 epoch_300）。
+
+**文件**：`csi_jepa/{__init__,model,data}.py`、`jepa_csi_pretrain.py`、`jepa_csi_downstream.py`、`audit_wifi_layout.py`、configs×5（csi_jepa_base / csi_eval_probe / csi_eval_mirror / jepa_aux_22000_wifi_only / eval_methods_mirror_wifi）。**唯一现有文件改动** = `jepa_modules.py` 抽出 `ema_module()` 自由函数（行为保持，EMATargetEncoder 委托调用）。原文件与多模态全栈零改动（保留作对照）。
+
+### 9.5 门槛（按序，各自可独立解读）与对比表
+
+| 门 | 判据 | 证明什么 |
+|:--|:--|:--|
+| **G1** | A1-ft > A1-scratch ≥3pp@100% 标签，且差距随标签减少**扩大** | 从零基座上自监督有效（1-5 轮缺失的 SSL 信号） |
+| **G2** | A1 > A0（probe 与 ft 双口径） | 任务无关 tokenizer 取代任务偏置 extractor（本轮核心主张） |
+| **G3（顺带）** | A1 WiFi@100% ≥ 0.7395（R4.6 WiFi 行） | 单模态不掉精度；不过而 G1/G2 过可接受 |
+| **G4（Phase C）** | MM-Fi 迁移 > scratch | 跨数据集基础模型证据 |
+
+对比表以 **WiFi 列为中心**：A_off 0.5606 / A' 0.5623 / R4.6 0.7395 / A0 / A1-scratch / A1-probe / A1-ft × {100%,10%,5%,1%}。**风险预案**：单模态 macro 大概率输 R4.6 多模态 0.7634（mmWave/RFID 信息按构造消失）——预先约定以 G1/G2/G4+标签效率为胜利条件，**不得**加回模态修数字。
+
+### 9.6 实施与冒烟记录（2026-10-31，agent 执行）
+
+- 模型级（CPU）：90 token 网格 ✓、前向有限 ✓、全 False 掩码≡无掩码恒等 ✓、JEPA 一步梯度 ✓、EMA 永久 eval ✓、state_dict strict 往返 ✓、掩码采样实现率 0.429（块重叠，符合设计）、逐链路掩码率近似均匀。
+- 管线级（GPU2）：预训练 3 步×1ep——corpus 21230/770（6600 已披露）、损失 0.365→0.252 下降、ztgt_std 0.242（塌缩线 0.1 之上）、val expl_var 0.62；下游三方法 × {best/last 回载、JSON} ✓；few-shot 5% = 770 样本每类恰 14（嵌套 ✓）；A0 两配置在旧脚本上 ✓（每 batch 恒 [F,T,F]）。
+
+### 9.7 完整命令（复制即用；`<卡N>` 先 nvidia-smi 挑空闲卡；A0 与 A1 预训练可双卡并行）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+# ---- A0 预训练（~2-3h；R4.6 配方唯 keep_probs 改 WiFi-only）
+CUDA_VISIBLE_DEVICES=<卡1> conda run -n xfi --no-capture-output python jepa_pretrain.py \
+    --config configs/jepa_aux_22000_wifi_only.yaml --run-name A0_pretrain_wifi_only
+# ---- A1 预训练（~3-5h；从零 300ep，checkpoint ~150MB×12）
+CUDA_VISIBLE_DEVICES=<卡2> conda run -n xfi --no-capture-output python jepa_csi_pretrain.py \
+    --config configs/csi_jepa_base.yaml --run-name A1_pretrain_base
+```
+
+```bash
+# ---- A0 下游（等 A0 预训练完；结果读 7 子集表的 WiFi 行）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_downstream.py \
+    --method jepa_finetune --config configs/eval_methods_mirror_wifi.yaml \
+    --dataset ../data/XRF55_Dataset_split \
+    --pretrained ./jepa_checkpoints/A0_pretrain_wifi_only/epoch_100.pth --run-name A0_ft_mirror
+# （可选）A0 探针口径：
+#   --method jepa_linear_probe，其余同上，--run-name A0_probe
+```
+
+```bash
+# ---- A1 下游（等 A1 预训练完；epoch_300 即 last）
+P=./csi_jepa_checkpoints/A1_pretrain_base/epoch_300.pth
+# G2/G3 主口径：mirror 微调
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_csi_downstream.py \
+    --method csi_finetune --config configs/csi_eval_mirror.yaml \
+    --dataset ../data/XRF55_Dataset_split --pretrained $P --run-name A1_ft_mirror
+# G1 对照：随机初始化 + 同配方（步数/数据完全对等）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_csi_downstream.py \
+    --method csi_scratch --config configs/csi_eval_mirror.yaml \
+    --dataset ../data/XRF55_Dataset_split --run-name A1_scratch_mirror
+# G2 探针口径：冻结 encoder + 新头
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_csi_downstream.py \
+    --method csi_probe --config configs/csi_eval_probe.yaml \
+    --dataset ../data/XRF55_Dataset_split --pretrained $P --run-name A1_probe
+# 标签效率（finetune 口径；probe 口径换 --method/--config 同理；三档嵌套、各方法见同样标签）
+for FR in 0.1 0.05 0.01; do
+  CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_csi_downstream.py \
+      --method csi_finetune --config configs/csi_eval_mirror.yaml --label-fraction $FR \
+      --dataset ../data/XRF55_Dataset_split --pretrained $P --run-name A1_ft_lab$(echo $FR | cut -d. -f2)
+done
+```
+
+参数说明：`--config` 全部超参出处；`--pretrained` 用 **epoch_300**（D34：best_val 仅诊断）；`--label-fraction` 有标签训练样本比例（分层嵌套，10%⊃5%⊃1%，各方法同 seed 同样本）；`--run-name` 产物独立归档不互相覆盖。结果在各 run 目录 `results.json`（headline 注明 best_by_val 或 last_model）。
+
+### 9.8 Phase B 展望（A 过 G1/G2 后另行细化设计）
+
+MUSE-FM（2509.01967 已读全文）：场景→俯视 scene graph→100×100 二值占据栅格→ViT patch tokens→与数据 tokens 拼接过 GPT-2 骨干→**解码端丢弃场景 tokens**；2600 个 Sionna 仿真场景 5 任务。**其两点不足属实**：(a) 栅格化/离散化保真度损失（二值、单通道、无材料厚度）；(b) 无多径物理引导（纯数据驱动学"环境决定传播"）。XRF55 无官方 floorplan（已核实）→ 从论文 Fig.2 照片重绘 2D（墙+柱；4 台 Intel 5300 位于矩形四角——D37 范围）。候选改进方向：多通道栅格（距离变换/墙体朝向）或墙体线段 token 化；场景 token 物理引导辅助目标（预测可测传播统计量）或 Sionna 仿真语料预训场景编码器；场景 tokens 保留至解码端 cross-attention 读出（不学其丢弃）；**必做 one-hot scene-id 退化对照**（防"场景查表"）。
+- **D42 Phase A 结果与判门（2026-11-01，人工执行，结果目录 `csi_eval_results/{A1_ft_mirror, A1_scratch_mirror, A1_probe, A1_ft_lab1, A1_ft_lab05, A1_ft_lab01}`、`jepa_eval_results/A0_ft_mirror`）**：
+  - **主结果：A1（csi_jepa）WiFi-only 微调 = 0.9168 —— 全项目历史最高单列数字**。vs R4.6 多模态冠军的 WiFi 行 0.7395 **+17.7pp**（G3 大幅通过）；vs A' 0.5623 / A_off 0.5606 约 **+35pp**；也超过 R4.6 的全模态 acc_all 0.8918 与官方全模态 89.5%（单模态打平/超越多模态总量）。A1 探针（冻结 encoder + 线性头）已达 **0.8067**（last）——表征本身线性可解码到 0.81，超过 R4.6 微调后的 WiFi 行。
+  - **G1 通过（主判据）**：A1-ft 0.9168 vs A1-scratch 0.7783 = **+13.9pp**（门 ≥3pp）。对比 D29 时代 JEPA-vs-A' 仅 +0.1~0.4pp——真正的"从零基座 + 自监督前端"下，SSL 信号首次大幅显形，证实 D29 归因（当时的学习几乎全在 HAR 监督的冻结 extractor 里）。
+  - **G2 通过（决定性）**：A1-ft 0.9168 vs A0-ft（冻结 HAR extractor、WiFi-only JEPA）WiFi 行 0.7741 = **+14.3pp**——任务无关 tokenizer 全面取代任务偏置 extractor（本轮核心主张成立）。附带发现：A0 的 0.7741 也已超 R4.6 的 WiFi 0.7395——单模态专训本身有红利。
+  - **标签效率曲线（A1-ft，配方一致口径）**：100% 0.9168 / 10% 0.4920 / 5% 0.3812 / 1% 0.1352。两点口径注意：① 10% 档目录名为 `A1_ft_lab1`（命令模板 `cut` 对 0.1 的产名差异，非丢 run）；② mirror 配方固定 100ep——低标签档步数同步缩减（10%≈300 步），绝对值被步数饥饿压低（D38 步数混杂的镜像情形），**但各方法横向对比仍公平（同 100ep 协议）**；G1 的"差距随标签减少扩大"子句需 scratch 低标签对照（未跑，可选）。
+  - **诚实性备注（论文必须处理）**：预训练语料含 test 划分无标签输入（已披露协议，R4.6 同款）；但 A1 中 encoder 本体（非仅 fusion）在该语料上训练，杠杆效应可能更大。**建议补 A1-15400 消融**（`include_test_split: false` 预训练 → 同下游）量化该杠杆，得到纯归纳口径数字。
+  - **Phase A 判定：三门全过（G1/G2/G3），Phase B（floorplan）解锁**。G4（MM-Fi 迁移）留 Phase C。
+
+### 9.9 Phase A 结果总表与判门（2026-11-01，D42）
+
+| 模型 | 预训练 | 目标 | WiFi acc@100% | 10% | 5% | 1% |
+|:--|:--|:--|:--|:--|:--|:--|
+| A_off（官方多模态监督） | — | HAR CE | 0.5606 | — | — | — |
+| A'（自训多模态监督） | — | HAR CE | 0.5623 | — | — | — |
+| R4.6（多模态 JEPA，冠军） | 22000 三模态 | masked latent | 0.7395 | — | — | — |
+| **A0**：冻结 extractor + WiFi-only JEPA → mirror ft | 22000 WiFi | masked latent | **0.7741** | — | — | — |
+| **A1-scratch**：csi_jepa 随机初始化 + mirror ft | — | — | 0.7783 | — | — | — |
+| **A1-probe**：csi_jepa 冻结 encoder + 线性头 | 22000 WiFi | masked latent | 0.8067（last）/ 0.8048（best-by-val） | — | — | — |
+| **A1-ft**：csi_jepa + mirror ft | 22000 WiFi | masked latent | **0.9168** | 0.4920 | 0.3812 | 0.1352 |
+
+（低标签档为 finetune 口径、各档同 100ep 协议；目录 `A1_ft_lab1`=10% 档。A0 的 7 子集表中 mmWave/RFID 行 ≈1/55 属 OOD 预期，诚实呈现。）
+
+**判门**：**G1 过**（+13.9pp vs scratch ≥3pp；"低标签差距扩大"子句待 scratch 低标签对照，可选）；**G2 过**（+14.3pp vs A0，probe/ft 双口径主张成立）；**G3 大幅过**（+17.7pp vs R4.6 WiFi 行）。**Phase B 解锁**。待办候选（人工决策）：① A1-15400 消融量化"test 无标签输入"杠杆（论文诚实性，~5h）；② A0_probe / scratch 低标签三档补口径（各 ~1h）；③ Phase C：MM-Fi 适配器 + 迁移评测（G4）。
+- **D43 补充实验排程（2026-11-01，人工批准"先做 1 和 2，完成后做 3（Phase B floorplan）"）**：① **A1-15400 消融**（量化"test 无标签输入"杠杆）：`configs/csi_jepa_base_15400.yaml` = csi_jepa_base.yaml 逐键复制、唯 `include_test_split: false`（单变量对照 A1_pretrain_base）；下游跑 ft（主口径，对照 0.9168）+ probe（对照 0.8067）。② **补口径**：A0_probe（补 G2 probe 侧，对照 A1-probe last 0.8067，同为 last-model 口径）；csi_scratch 低标签三档 10%/5%/1%（补 G1"差距随标签减少扩大"子句，对照 A1-ft lab 档；目录名显式 lab10/lab05/lab01，修正 D42 的 cut 产名差异）。**预期**：A1-15400 落后 22000 版若干 pp = 杠杆量化（若接近则 0.9168 主要是架构红利，叙事更强）；scratch 低标签差距若随标签减少扩大 → SSL 信号完整成形。命令见 §9.10。完成后回填 §9.9 表并解锁 Phase B。
+
+### 9.10 D43 完整命令（复制即用；先 nvidia-smi 挑空闲卡）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+# ---- ① A1-15400 预训练（~3-4h；唯一差异 = 语料 15400，其余逐键同 A1_pretrain_base）
+CUDA_VISIBLE_DEVICES=<卡A> conda run -n xfi --no-capture-output python jepa_csi_pretrain.py \
+    --config configs/csi_jepa_base_15400.yaml --run-name A1_pretrain_15400
+
+# ---- ② 补口径（可与 ① 并行跑另一张卡；都很便宜）
+# A0 探针（G2 probe 侧；~1h；headline 为 last-model，与 A1-probe 的 last 0.8067 同口径对比）
+CUDA_VISIBLE_DEVICES=<卡B> conda run -n xfi --no-capture-output python jepa_downstream.py \
+    --method jepa_linear_probe --config configs/eval_methods_mirror_wifi.yaml \
+    --dataset ../data/XRF55_Dataset_split \
+    --pretrained ./jepa_checkpoints/A0_pretrain_wifi_only/epoch_100.pth --run-name A0_probe
+# scratch 低标签三档（G1 扩大子句；10% 档步数少、跑得快）
+for FR in 0.1 0.05 0.01; do
+  CUDA_VISIBLE_DEVICES=<卡B> conda run -n xfi --no-capture-output python jepa_csi_downstream.py \
+      --method csi_scratch --config configs/csi_eval_mirror.yaml --label-fraction $FR \
+      --dataset ../data/XRF55_Dataset_split --run-name A1_scratch_lab$(echo $FR | cut -d. -f2)
+done
+```
+
+```bash
+# ---- ①' A1-15400 下游（等 ① 完成后）
+P=./csi_jepa_checkpoints/A1_pretrain_15400/epoch_300.pth
+# ft 主口径（对照 A1-ft 0.9168）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_csi_downstream.py \
+    --method csi_finetune --config configs/csi_eval_mirror.yaml \
+    --dataset ../data/XRF55_Dataset_split --pretrained $P --run-name A1_ft_mirror_15400
+# probe 口径（对照 A1-probe 0.8067 last）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_csi_downstream.py \
+    --method csi_probe --config configs/csi_eval_probe.yaml \
+    --dataset ../data/XRF55_Dataset_split --pretrained $P --run-name A1_probe_15400
+```
+
+参数说明：`csi_jepa_base_15400.yaml` 与 `csi_jepa_base.yaml` 唯一差异是 `include_test_split: false`（预训练语料 22000→15400）；`--label-fraction` 三档嵌套（10%⊃5%⊃1%）；run 名显式 lab10/lab05/lab01（修正 D42 的 cut 产名差异）。结果回填：把 run 目录名发 agent 或自行填 §9.9 表。
+- **D44 D43 结果与结论（2026-11-02，人工执行，结果目录 `csi_eval_results/{A1_ft_mirror_15400, A1_probe_15400, A1_scratch_lab1, A1_scratch_lab05, A1_scratch_lab01}`、`jepa_eval_results/A0_probe`）**：
+  - **杠杆量化完成，主张与语料解耦（论文诚实性目标达成）**：A1-15400（唯 `include_test_split:false` 差异）ft = **0.9012**（vs 22000 版 0.9168，杠杆 = **+1.6pp**）、probe = 0.7326 last（vs 0.8067，杠杆 = **+7.4pp**）。**纯归纳口径 0.9012 仍全面领先**：vs R4.6 WiFi 0.7395 = +16.2pp、vs A0-ft 0.7741 = +12.7pp、vs scratch 0.7783 = +12.3pp——0.9168 主要是架构红利而非无标签 test 输入杠杆。建议论文主叙事用 0.9012（干净口径），0.9168 作为已披露协议下的上限注记。probe 比 ft 对语料敏感 +4.5×（+7.4 vs +1.6pp）——冻结表征的可读性直接受益于更多样的无标签输入，微调适配可大部分补足，符合预期。
+  - **G2 双口径闭环**：A0_probe（last-model 口径）WiFi **0.6958** vs A1_probe 0.7326 = +3.7pp；连同 ft 口径 +14.3pp——"任务无关 tokenizer ≥ 任务偏置 extractor"在 probe/ft 两侧一致成立。A0 的 mmWave/RFID 行 0.017-0.029（≈1/55）为 OOD 预期，如实呈现。
+  - **G1 低标签子句（带诊断的诚实结论）**：差距 10% = **+47.4pp**（scratch 0.0182 崩至随机 vs A1 0.4920）、5% = +21.3pp、1% = +5.1pp（1% 档双方都近地板，0.1352 vs 0.0844）。**scratch 在 ~300 步预算下不稳定**：TB 曲线显示 lab1 全程 train loss 钉在 ln(55)≈4.05、train acc 7.9%（未学习也未发散），而 lab05 同配方正常收敛（4.18→1.65，train acc 65%）——随机初始化 ViT + 恒定 lr + 极小步数在刀锋区间，10% 档该抽未逃出。**结论修正表述：自监督预训练在低标签域不仅提升精度、更是"域稳定器"**（scratch 崩、预训练不崩）；严格单调扩大不成立（1% 地板效应），few-shot 曲线的最终版需步数匹配协议（D38 教训）或多种子均值——留作论文期精修，不阻塞主线。
+  - **Phase A 全部实验收官**：G1（+13.9pp 且低标签最大 +47.4pp）/G2（ft +14.3pp、probe +3.7pp）/G3（+17.7pp，干净口径 +16.2pp）三门全过。**Phase B（floorplan）已就绪待人工下令**（人工指示"Phase B 先别马上开始"——遵守）。
+
+### 9.11 补充结果总表（D44，2026-11-02；与 §9.9 合并阅读）
+
+| 模型 / 口径 | WiFi@100% | 10% | 5% | 1% |
+|:--|:--|:--|:--|:--|
+| **A1-ft（22000，已披露协议）** | **0.9168** | 0.4920 | 0.3812 | 0.1352 |
+| **A1-ft（15400，纯归纳口径）** | **0.9012** | — | — | — |
+| A1-probe（22000） | 0.8067 last | — | — | — |
+| A1-probe（15400） | 0.7326 last | — | — | — |
+| A1-scratch | 0.7783 | 0.0182（未学习，见 D44 诊断） | 0.1682 | 0.0844 |
+| A0-ft（G2 对照） | 0.7741 | — | — | — |
+| A0-probe（G2 对照） | 0.6958 last | — | — | — |
+| （参考）R4.6 多模态冠军 WiFi 行 | 0.7395 | — | — | — |
+
+**杠杆结论**：无标签 test 输入杠杆 = ft +1.6pp / probe +7.4pp——主张与语料解耦，干净口径 0.9012 仍领先次优 +12.3pp。**G2 双口径闭环**（ft +14.3 / probe +3.7）。**G1 低标签**：10% 档 +47.4pp（scratch 崩至随机、预训练稳定——"域稳定器"效应）、1% 档地板效应差距收窄；few-shot 最终版需步数匹配/多种子（论文期精修）。

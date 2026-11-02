@@ -1,0 +1,46 @@
+seed: 3407
+data:
+  root: ../data/XRF55_Dataset_split
+  batch_size: 512
+  num_workers: 4
+  val_split: 0.05
+  pin_memory: false
+  prefetch_factor: 2
+  include_test_split: false
+model:
+  channels: 270
+  time_steps: 1000
+  patch_c: 30        # = subcarriers of ONE RX link (audit_wifi_layout.py: 270 = 9 links x 30)
+  patch_t: 100       # 0.1 s time slice (lag-100 autocorrelation ~0.07-0.15)
+  dim: 256
+  depth: 8
+  num_heads: 4
+  ffn_dim: 1024
+  dropout: 0.0
+  input_norm: none   # 'channel_std' available (model-internal buffers); default off
+  predictor:
+    depth: 4
+    num_heads: 4
+    ffn_dim: 512
+    dropout: 0.0
+optim:
+  lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 10
+  epochs: 300
+ema:
+  base_momentum: 0.996
+mask:
+  token_mask_rate: 0.5
+  rect_c: 2
+  rect_t: 2
+  link_dropout_prob: 0.3
+log:
+  save_dir: ./csi_jepa_checkpoints
+  save_every_epochs: 25
+  log_masks_first_epoch: true
+_variant: "Phase A ablation (PROJECT_LOG D43): A1-15400. Identical to csi_jepa_base.yaml\
+  \ in EVERY key except data.include_test_split: false — corpus = train 15400 only.\
+  \ Single-variable control vs A1_pretrain_base (22000): quantifies the 'unlabeled\
+  \ test-split inputs' lever (A1-ft 0.9168 / probe 0.8067 were trained on a corpus\
+  \ containing test inputs, disclosed protocol). Clean inductive numbers for the paper."

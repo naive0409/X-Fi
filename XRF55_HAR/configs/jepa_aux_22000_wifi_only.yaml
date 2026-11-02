@@ -1,0 +1,47 @@
+seed: 3407
+data:
+  root: ../data/XRF55_Dataset_split
+  batch_size: 512
+  num_workers: 4
+  val_split: 0.05
+  pin_memory: false
+  prefetch_factor: 2
+  include_test_split: true
+model:
+  model_depth: 5
+  num_classes: 55
+  backbone_root: ./backbone_models
+  predictor:
+    depth: 4
+    num_heads: 8
+    ffn_dim: 2048
+    dropout: 0.0
+optim:
+  lr: 0.0005
+  weight_decay: 0.05
+  warmup_epochs: 5
+  epochs: 100
+ema:
+  base_momentum: 0.996
+bn_warmup_batches: 50
+mask:
+  modality_keep_probs:
+  - 0.0
+  - 1.0
+  - 0.0
+  token_mask_rate: 0.25
+log:
+  save_dir: ./jepa_checkpoints
+  save_every_epochs: 10
+  log_masks_first_epoch: true
+aux_loss:
+  weight: 0.5
+  ramp_epochs: 5
+  normalize: both
+_variant: "Phase A0 (PROJECT_LOG ⑨): WiFi-ONLY context control. Identical to the\
+  \ R4.6 champion recipe (jepa_aux_22000.yaml, byte-identical otherwise) except modality_keep_probs\
+  \ [0.0,1.0,0.0] — every context batch is WiFi-only, so the HAR-supervised frozen\
+  \ extractor + JEPA fusion is evaluated in the unimodal setting. Target branch stays\
+  \ all-modality (existing mechanism); aux heads therefore always predict mmWave+RFID\
+  \ features. Purpose: G2 control — A1 (csi_jepa) must beat this to claim the\
+  \ task-agnostic tokenizer supersedes the task-biased extractor."

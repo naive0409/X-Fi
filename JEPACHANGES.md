@@ -20,6 +20,13 @@
 | `XRF55_HAR/make_xrf55_split.py` | XRF55 train/test 符号链接划分树（官方 14/6 试验划分） | §6 |
 | `XRF55_HAR/run_xfi_baseline.py` | 原版 X-Fi 自训的忠实包装：复刻 `run.py` 设置（数据/种子/模型/`utils.har_train`），仅把产物按 `--run-name` 归档到 `xfi_baseline_runs/<run名>/`；`run.py`/`utils.py` 仍零改动 | §1.3 |
 | `environment.yml` | conda 环境定义（`conda env export -n xfi` 导出） | §0-1 |
+| `audit_wifi_layout.py` | WiFi 通道布局只读审计（9 链路×30 子载波 + 幅度-only 判定） | §9 |
+| `csi_jepa/`（包） | 单模态任务无关基座：CSITokenizer / CSIJEPAEncoder / CSIEMATargetEncoder / WiFiOnlyDataset | §9 |
+| `jepa_csi_pretrain.py` | csi_jepa 阶段 1 预训练（从零，300ep） | §9 |
+| `jepa_csi_downstream.py` | csi_jepa 阶段 2 下游（probe/finetune/scratch） | §9 |
+| `configs/csi_jepa_base.yaml` | A1 预训练全部超参 | §9 |
+| `configs/csi_eval_probe.yaml` / `configs/csi_eval_mirror.yaml` | A1 下游两口径 | §9 |
+| `configs/jepa_aux_22000_wifi_only.yaml` / `configs/eval_methods_mirror_wifi.yaml` | **A0 对照**（R4.6 配方逐字节复制唯 keep_probs→[0,1,0]） | §9 |
 | `PROJECT_LOG.md` / `JEPACHANGES.md` | 项目文档 / 本文档 | §0-4, §9 |
 
 ## 2. `X_Fi_backbone.py` 相对 `X_Fi.py` 的差异（逐条）
@@ -37,6 +44,10 @@
 1. **Predictor**：4 层 pre-LN transformer（dim 512 / heads 8 / ffn 2048，`nn.MultiheadAttention`），输入加可学习位置编码与"推断标记" embedding，输出 LayerNorm；`(B,32,512) -> (B,32,512)`（§4.2）。
 2. **EMATargetEncoder**：只 deepcopy `linear_projector + X_Fusion`；**特征提取器按引用共享**（决策 2 / 陷阱 4），不复制不 EMA；参数与浮点 buffer 每步 EMA，整数 buffer（BN `num_batches_tracked`）直接拷贝；momentum 按 I-JEPA 余弦 `0.996 -> 1.0`（随训练进度）；分支整体**永久 eval()**（陷阱 3 的人工确认方案：保留 BatchNorm，EMA 侧用自己的 EMA 统计量，绝不双更新）。
 3. 目标分支输入恒为完整数据、全模态、无词元掩码（§5.1 step 5）。
+
+## 3b. `jepa_modules.py` 的唯一后补改动（2026-10-31，行为保持）
+
+把 `_ema_module` 的 EMA 数学抽成模块级自由函数 **`ema_module(ema_mod, online_mod, m)`**，`EMATargetEncoder._ema_module` 改为委托调用（数值行为逐位不变）——供 `csi_jepa.CSIEMATargetEncoder` 复用同一实现（Phase A1 的目标分支 EMA 整个 encoder，无冻结共享件）。
 
 ## 4. `jepa_pretrain.py` 的关键实现决定
 
@@ -80,3 +91,44 @@
 - 场景先验模态（§8-1）：`modality_list` 机制与 `X_Fi_Backbone` 的 token 掩码按 `(B, num_modalities, 32)` 设计，加第 4 模态只需扩 kv_layers/projection 分支与 config 概率表，无需改 JEPA 组件。
 - MAE 对照组（§5.4-D）：接口已留（Predictor 与骨干解耦），未实现。
 - `X_Fusion.classification_head` 在骨干中存在但闲置（为保证 state_dict 兼容），已从所有优化器/EMA 路径排除。
+
+## 9. `csi_jepa` 单模态任务无关基座家族（Phase A，2026-10-31；PROJECT_LOG §9/D40）
+
+> 动机：D35 天花板（仅预训练 12.4M fusion）+ 导师基础模型方向 + 人工三分支指示（单模态化 / 任务无关预训练 / floorplan 后置）。任务无关性检查结论：原版 X-Fi 无预训练（端到端监督）；本体系残留任务特异性 = 冻结 extractor 是 HAR 监督权重。故从原始 CSI 自训 tokenizer+encoder 整体替换前端。**多模态全栈零改动，保留作对照。**
+
+### 9.1 `csi_jepa/model.py`
+
+1. **`CSITokenizer`**：原始 (270,1000) 幅度 CSI → `Conv2d(1, D, k=(patch_c,patch_t), stride=同)` 结构化切块 → (grid_c×grid_t, D) token 网格（默认 9×10=90）；**分解式位置编码** `pos_c(1,grid_c,1,D)+pos_t(1,1,grid_t,D)`（跨数据集网格尺寸变化只需改 config/插值——应对链路数不统一，MM-Fi 为 3 链路 114 子载波）；`input_norm: channel_std` 可选（统计量以 buffer 存于**模型内部**、`set_input_stats` 安装——dataloader 恒原始值，陷阱 9 约定不破），默认 `none`。
+2. **`CSIJEPAEncoder`**：tokenizer + norm_in + N×PreLNBlock（复用 `jepa_modules.PreLNBlock`）+ 可学习 `mask_token` 替换（同 `X_Fi_Backbone.apply_token_mask` 模式，(B,L) 布尔）+ `norm_out`（D17 尺度锚从第 0 天内置）。**全程无 BatchNorm** → BN warmup / buffer 同步 / eval 守卫整类问题结构性消失。默认 8 层 (256,4,1024) = 7.09M。
+3. **`CSIEMATargetEncoder`**：deepcopy **整个** encoder（与 1-5 轮的结构性差异：无冻结 extractor 可共享引用——extractor 即可训 tokenizer，故目标分支逐参 EMA 全部参数）；永久 `eval()`；EMA 数学 = `jepa_modules.ema_module` 共享实现；无 BN 故无 `sync_buffers_from`。
+
+### 9.2 `csi_jepa/data.py`
+
+`WiFiOnlyDataset`：镜像 `XRF55_Dataset.py` 的目录约定与标签规则（`basename.split('_')[1]-1`），只 glob WiFi——单模态 IO 每样本 ~2.2MB vs 三模态 ~4.5MB（epoch 提速）。`wifi_collate`：float32 堆叠 + 无归一化（陷阱 9）。
+
+### 9.3 `jepa_csi_pretrain.py`（复制 `jepa_pretrain.py` 做减法，项目惯例）
+
+- **删除**：模态机制全套（modality_list / subset_schedule / keep_probs）、跨模态辅助头、BN warmup + buffer 同步。
+- **保留**：22000 语料（`include_test_split`，协议披露日志行原样）、分层 val 只从 train 划（D34：SSL val 仅诊断，下游用 epoch_300）、掩码独立 RandomState(seed+1)（陷阱 8）、`--run-name` 归档 + TB + CSV、checkpoint 组 last/epoch_N/best_val、ztgt_std 塌缩监视（D19）、非有限损失跳过。
+- **新增**：`build_grid_mask`——2D 矩形块（rect_c×rect_t=2×2 至 rate 0.5，起点无放回抽取、块可重叠，实际实现率 ~0.43）+ 每样本 p=0.3 整链路 10 token 全掩（WiFi-JEPA link-mask 对应物）。
+- **配方**：b512 / lr 1e-3（从零 > 预训 fusion 的 5e-4）/ wd 0.05 / warmup 10ep + cosine / **300ep** / EMA 0.996→1.0。可训 9.22M（encoder 7.09 + predictor 2.13，后者复用 `Predictor` 类重参数化）。
+
+### 9.4 `jepa_csi_downstream.py`（复制 `jepa_downstream.py` 做减法）
+
+- 方法三挡：`csi_probe`（冻结 encoder + 新 `classification_Head(dim,55)`，头类从 `X_Fi_backbone` 导入——池化均值+LN+Linear 协议与多模态管线逐位一致）/ `csi_finetune`（mirror：恒定 lr 1e-4 头与 encoder 同 / wd 0.01 / 无调度 / 无 val / last-model）/ `csi_scratch`（随机初始化 encoder + 同 mirror 配方 = 新 C 组，步数/数据与 B' 完全对等）。
+- 单一 WiFi 评估条件（7 子集坍缩为 1；JSON 保留 `worst_subset/macro_avg` 键=同值，仅为 schema 兼容）。样本粒度。
+- 架构自描述：probe/finetune 从 checkpoint 内嵌 `config.model` 读架构（strict 加载）；scratch 用 eval config 的 `model` 块。
+- few-shot `--label-fraction`：复用嵌套分层抽样（同 seed 同样本，10%⊃5%⊃1%），val 划分后再抽（零泄漏）。
+- **修正一处原脚本隐患**（PROJECT_LOG D41）：best/last 两口径评估各自完整回载 encoder+head（原 `jepa_downstream.py` 在 best.pth 存在时 `accuracy_last_model` 实为 best 权重——已发布 mirror 结果不受影响，原文件不动）。
+
+### 9.5 A0 对照（零代码，两份配置）
+
+`configs/jepa_aux_22000_wifi_only.yaml` = R4.6 冠军配置逐字节复制、唯 `modality_keep_probs: [0.0,1.0,0.0]`（现有采样代码 `rng.random_sample(3) < keep_probs` 自动强制每 batch WiFi-only；目标分支仍全模态、辅助头恒预测 mmWave+RFID）；`configs/eval_methods_mirror_wifi.yaml` = mirror 配方同概率表。用途 = G2 对照：HAR 监督冻结 extractor 在单模态设置下的交付水平。**读 7 子集表的 WiFi 行**（其余行 OOD，macro/worst 对 A0 无意义）。
+
+### 9.6 `audit_wifi_layout.py`（只读审计，数据事实）
+
+跨 4 场景 train+test 抽 12 文件：形状恒 (270,1000)；min≡0（**纯幅度**，纠正"3×30×3 分量"旧记忆）；30 通道块内相关 0.42 ≫ 跨块 0.33 ≫ 跨 90 超块 0.12（**9 链路×30 子载波**，3 笔记本×3 天线，与论文 §3.1 一致）；时间 lag-100 自相关 0.07-0.15（100 采样=自然去相关单元）→ **patch (30,100) 定案**。
+
+### 9.7 门槛（G1-G4）与对比口径
+
+G1：A1-ft > A1-scratch ≥3pp 且低标签差距扩大（SSL 信号）；G2：A1 > A0（probe/ft 双口径，本轮核心主张）；G3（顺带）：A1 WiFi@100% ≥ 0.7395；G4（Phase C）：MM-Fi 迁移 > scratch。对比表 WiFi 列中心：A_off 0.5606 / A' 0.5623 / R4.6 0.7395 / A0 / A1-scratch / A1-probe / A1-ft × {100,10,5,1}%。**风险预案：单模态 macro 预计输多模态 R4.6 0.7634（模态信息按构造消失）——以 G1/G2/G4+标签效率为胜利条件，不得加回模态修数字。**
