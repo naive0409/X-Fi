@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640"><rect width="640" height="640" fill="white"/>
+<line x1="35.6" y1="604.4" x2="604.4" y2="604.4" stroke="black" stroke-width="14.2" stroke-linecap="round"/>
+<line x1="604.4" y1="604.4" x2="604.4" y2="177.8" stroke="black" stroke-width="14.2" stroke-linecap="round"/>
+<line x1="604.4" y1="177.8" x2="35.6" y2="177.8" stroke="black" stroke-width="14.2" stroke-linecap="round"/>
+<line x1="35.6" y1="177.8" x2="35.6" y2="604.4" stroke="black" stroke-width="14.2" stroke-linecap="round"/>
+<circle cx="106.7" cy="533.3" r="6" fill="red"/>
+<line x1="106.7" y1="533.3" x2="106.7" y2="519.3" stroke="red" stroke-width="2"/>
+<text x="114.7" y="525.3" font-size="12" fill="red">wifi_tx</text>
+<circle cx="533.3" cy="533.3" r="6" fill="blue"/>
+<line x1="533.3" y1="533.3" x2="533.3" y2="547.3" stroke="blue" stroke-width="2"/>
+<text x="541.3" y="525.3" font-size="12" fill="blue">wifi_rx1</text>
+<circle cx="533.3" cy="248.9" r="6" fill="blue"/>
+<line x1="533.3" y1="248.9" x2="533.3" y2="262.9" stroke="blue" stroke-width="2"/>
+<text x="541.3" y="240.9" font-size="12" fill="blue">wifi_rx2</text>
+<circle cx="106.7" cy="248.9" r="6" fill="blue"/>
+<line x1="106.7" y1="248.9" x2="106.7" y2="262.9" stroke="blue" stroke-width="2"/>
+<text x="114.7" y="240.9" font-size="12" fill="blue">wifi_rx3</text>
+<text x="8" y="18" font-size="14">Scene3 (bbox 8.0m x 6.0m)</text>
+</svg>

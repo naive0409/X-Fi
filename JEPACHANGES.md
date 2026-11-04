@@ -132,3 +132,30 @@
 ### 9.7 门槛（G1-G4）与对比口径
 
 G1：A1-ft > A1-scratch ≥3pp 且低标签差距扩大（SSL 信号）；G2：A1 > A0（probe/ft 双口径，本轮核心主张）；G3（顺带）：A1 WiFi@100% ≥ 0.7395；G4（Phase C）：MM-Fi 迁移 > scratch。对比表 WiFi 列中心：A_off 0.5606 / A' 0.5623 / R4.6 0.7395 / A0 / A1-scratch / A1-probe / A1-ft × {100,10,5,1}%。**风险预案：单模态 macro 预计输多模态 R4.6 0.7634（模态信息按构造消失）——以 G1/G2/G4+标签效率为胜利条件，不得加回模态修数字。**
+
+## 10. DLoc floorplan 条件化试点家族（Phase B-v2，2026-11-02；PROJECT_LOG §11/D45）
+
+> 转向：训练底料从"XRF55 照片手绘 4 场景"改为用户既有的 floorplan_dataset 体系（DLoc 单数据集试点，XRF55 降为后续迁移目标）。A1 文件零改动（组合而非修改）。
+
+### 10.1 新增文件
+
+| 文件 | 职责 |
+|:--|:--|
+| `XRF55_HAR/build_dloc_cache.py` | DLoc HDF5→(N,32,234) float32 memmap 缓存 + sidecar（labels/AP 质心/valid_ap/P1 逐(AP,频带)块统计）；re/im 交错行布局 |
+| `XRF55_HAR/csi_jepa/dloc_data.py` | memmap Dataset/collate/四种划分（interp 块 90-10 主口径/rand/loso/building）/逐场景 P1 目标表 (8,4,9) |
+| `XRF55_HAR/csi_jepa/floorplan.py` | DLocRasterBuilder（4 通道度量张量：occ/SDF/unknown/AP-gauss，全局 64×29m 画布 0.2m 格元）/SceneEncoder（128 raster tokens + 4 AP 连续坐标 token）/OneHotSceneEncoder（B2 对照）/FPCSIJEPA（168-token 单 encoder，场景无关 EMA 视图）/P1Head（36 维，防场景查表槽位） |
+| `XRF55_HAR/dloc_csi_pretrain_fp.py` | 场景拼接 JEPA 预训练（批内唯一场景分组前向；P1 辅助 λ0.3 ramp5；scene_token_dropout 门控） |
+| `XRF55_HAR/dloc_csi_downstream_fp.py` | XY 定位回归下游（mirror 配方统一 last-model headline；fp_probe/finetune/scratch；--scene-mode shuffled 评估期错配=严格查表检测；欧氏误差指标族） |
+| `configs/dloc_jepa_fp{,_none,_onehot,_shuffled}.yaml` | 预训练主线+三对照（逐键复制唯 scene_mode） |
+| `configs/dloc_eval_fp_mirror.yaml` | 下游 mirror 配置 |
+| `floorplan_dataset/FLOORPLAN_SPEC.md`（修订） | 画布修正 1024×464；新增 §5b 模型输入张量（0.2m 格元/4m patch 固定物理尺寸、4 通道、AP 连续坐标）；§5.3 WILD 适配器；§5.4 XRF55 迁移占位 |
+| `floorplan_dataset/make_all_tensors.py` | 张量缓存生成器（WILD 已实现 29 张；其余数据集扩量期 adapter 桩） |
+
+### 10.2 关键设计约定（区别于 A1）
+
+1. **re/im 行交错**（非幅度）：保留 AoA 跨天线相位梯度与延迟扩展几何信号、避免相位卷绕；mag 为单键消融（patch_c 4/8 自适应，token 网格恒 (4,9)=36）。
+2. **场景 tokens 保留到输出**（vs MUSE-FM 解码端丢弃）；EMA 目标 = 场景无关 CSI-only——场景分支只能经 context 注意力获梯度，"恒定场景输出"无法降损。
+3. **AP 连续坐标 token**（query+MLP[x,y,valid]）：回归友好米制框架 + 栅格 bump 不承载 AP 身份（可泛化未见摆放）。
+4. **P1 输出 36 维**（非逐场景槽位）：场景身份必须经场景表征传导——one-hot 无法通过输出层捷径记忆。
+5. 划分用**文件序连续块**（文件序=1cm 步进游走，随机划分跨 split 泄漏近邻）。
+6. 冒烟修复三 bug：CSITokenizer channel_std 广播 4D（**潜伏于 A1、从未触发**，buffer (1,1,C,1)→(1,C,1)）；P1 槽位设计；加权损失分母缺 dim 因子（×256 虚高）。

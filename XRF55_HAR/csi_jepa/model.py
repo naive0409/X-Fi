@@ -40,9 +40,11 @@ class CSITokenizer(nn.Module):
         self.grid_t = time_steps // patch_t
         self.input_norm_mode = input_norm
         if input_norm == 'channel_std':  # stats live INSIDE the model as buffers (trap 9:
-            # the dataloader stays raw); set via set_input_stats() before training
-            self.register_buffer('inp_mean', torch.zeros(1, 1, channels, 1))
-            self.register_buffer('inp_std', torch.ones(1, 1, channels, 1))
+            # the dataloader stays raw); set via set_input_stats() before training.
+            # Buffer shape (1, C, 1) — broadcasting (B,C,T)-(1,C,1) stays 3D. (The former
+            # (1,1,C,1) silently produced a 4D (1,B,C,T); latent until channel_std use.)
+            self.register_buffer('inp_mean', torch.zeros(1, channels, 1))
+            self.register_buffer('inp_std', torch.ones(1, channels, 1))
         self.patch_embed = nn.Conv2d(
             1, dim, kernel_size=(patch_c, patch_t), stride=(patch_c, patch_t))
         self.pos_c = nn.Parameter(torch.zeros(1, self.grid_c, 1, dim))

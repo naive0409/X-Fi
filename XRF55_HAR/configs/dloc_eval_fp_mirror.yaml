@@ -1,0 +1,40 @@
+seed: 3407
+data:
+  cache_root: ../data/dloc_cache
+  train_batch_size: 512
+  test_batch_size: 512
+  num_workers: 4
+  split: interp         # interp | rand | loso | building（--split 可覆盖；须与预训练一致）
+model:
+  # fallback arch（fp_scratch 用）；probe/finetune 以 ckpt 内嵌 config 为准
+  dim: 256
+  depth: 8
+  num_heads: 4
+  ffn_dim: 1024
+  dropout: 0.0
+  scene_mode: raster    # raster | onehot | none（对照各自配对应预训练 run）
+  canvas: global
+  raster_patch: 20
+  csi_repr: reim
+linear_probe:
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_every: 1
+finetune:
+  epochs: 100
+  head_lr: 0.0001
+  backbone_lr: 0.0001
+  weight_decay: 0.01
+  warmup_epochs: 0
+  eval_every: 1
+  schedule: none
+eval:
+  save_json: auto
+_variant: "Phase B-v2 downstream (PROJECT_LOG §11): XY localization regression, mirror\
+  recipe (constant lr 1e-4, wd 0.01, no scheduler, last-model headline uniformly\
+  across methods). Headline = mean/median Euclidean (m) + p75/p90 + %<1m, per-scene\
+  table in results.json. Controls: onehot/shuffled/none scene modes (each paired\
+  with its own pretrain run); --scene-mode shuffled with a raster pretrained ckpt\
+  = strict floorplan-mismatch probe."

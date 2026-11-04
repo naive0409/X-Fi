@@ -813,3 +813,188 @@ CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python jepa_csi
 | （参考）R4.6 多模态冠军 WiFi 行 | 0.7395 | — | — | — |
 
 **杠杆结论**：无标签 test 输入杠杆 = ft +1.6pp / probe +7.4pp——主张与语料解耦，干净口径 0.9012 仍领先次优 +12.3pp。**G2 双口径闭环**（ft +14.3 / probe +3.7）。**G1 低标签**：10% 档 +47.4pp（scratch 崩至随机、预训练稳定——"域稳定器"效应）、1% 档地板效应差距收窄；few-shot 最终版需步数匹配/多种子（论文期精修）。
+
+## 10. Phase B 设计稿：floorplan 场景条件化 csi_jepa（2026-11-02，人工批准开工）
+
+### 10.1 目标与门槛
+
+把"环境几何 → 多径传播"先验显式注入 A1 基座，正面回应 MUSE-FM（2509.01967）两弱点。
+判门：**B1** floorplan 条件化 > 无条件 A1（同预算 HAR ft，WiFi 列；无条件已有 0.9012/0.9168）；
+**B2**（创新成色，必备）floorplan > one-hot scene-id 对照——不过此门则模型只是"场景查表"；
+**B3**（泛化主场）leave-one-scene-out：3 场景训练 → 第 4 场景微调，floorplan 条件化应加速适应
+（CSI 本身已隐含场景信息，同分布 B1 增益可能 modest，跨场景才是价值主张）；**B4**（可选）设备
+位置扰动鲁棒性。
+
+### 10.2 B0 数据（人工前置 ~0.5-1 天，已交付规范）
+
+矢量 JSON（墙线段/柱圆/4 台 Intel 5300 位置朝向；米制、原点=房间左下角、跨场景一致）。
+`floorplans/SPEC.md`（手绘指南 + schema）+ `floorplans/template_scene.json`（Scene3 优先——
+照片红色距离标注用于比例标定）+ `floorplan_check.py`（零依赖：schema 校验、外墙缺口提示、
+设备间距表对照红色标注、跨场景布局一致性检查、SVG 目检产物）。跨场景设备间距 >0.5m 告警。
+
+### 10.3 编码方案 v1（回应批评 a"保真度不足"）
+
+- **多通道栅格 64×64**（对比 MUSE-FM 的单通道二值 100×100）：ch1 占据（墙+柱、~0.2m 厚度
+  光栅化）；ch2 **归一化 SDF**（scipy EDT——连续"到墙距离"场，栅格化信息损失的补偿）；
+  ch3 TX 高斯图；ch4 RX 高斯图。**度量尺度保持**：栅格覆盖房间包围盒、pad 成正方（米制，
+  ~12.5cm/格），无 aspect 拉伸（MUSE-FM 的另一失真源）。
+- 小 ViT：patch 8×8 → **64 scene tokens × D256**（与 CSI encoder 同维），拼接进 CSI 90 tokens
+  （MUSE-FM 可比）但**场景 tokens 保留到输出端**（改进其"解码端丢弃"），分类头对全部 154 tokens
+  平均池化（`classification_Head` 天然支持）。
+- v2 备选（若 B2 增益不足或需更强创新）：墙体线段连续 token 化（每线段 = 端点+朝向+长度 经
+  MLP 编码，零栅格化损失）。
+
+### 10.4 物理引导 v1（回应批评 b"缺乏多径学习引导"）
+
+- **P1 辅助目标（数据可得、零新依赖）**：场景 tokens 预测**逐链路 CSI 幅度统计**（9 链路，
+  可扩 9×子载波块；每场景统计从 22000 语料实测提取）——迫使场景通道编码"决定传播"的几何，
+  与 one-hot 对照互补（P1 是结构性约束：one-hot 无几何，无法过 P1）。无参数 LN 两侧（D17 纪律）。
+- **P2 备选（v2）**：Sionna RT 仿真 (场景→多径特征) 语料预训场景编码器，sim-to-real——工作量大，
+  仅当 P1/主目标不足时启动。
+- **几何 jitter 增强**：设备位置/墙微扰（±0.2-0.5m）——4 个唯一场景下防记忆化 + 直接服务 B4。
+
+### 10.5 集成与训练
+
+- `csi_jepa/floorplan.py`：RasterBuilder（JSON→64×64×4，scipy）、SceneEncoder（4 通道 ViT）、
+  OneHotSceneEncoder（B2 对照，4 维可学 embedding）。
+- `jepa_csi_pretrain_fp.py`（复制减法新文件）：context = [scene tokens(64); 掩码 CSI tokens(90)]，
+  predictor 从 CSI 位置读出预测全部 90 个目标 latent；**target = 场景无关的 EMA CSI encoder**
+  （场景分支只经 context 注意力获得梯度）；语料同 22000；P1 辅助损失 λ~0.3。
+- `jepa_csi_downstream_fp.py`：dataset 返回 scene_idx（文件路径解析 SceneN），其余协议同 A1
+  （probe/ft/scratch × 标签效率）。
+- 对照组：无条件 A1（已有）、one-hot（B2）、（可选）shuffled-floorplan（错配场景图，严格版查表检测）。
+
+### 10.6 风险与预期管理
+
+① 4 个唯一场景 → 条件化易退化查表（one-hot/shuffled 双对照防）；② CSI 已隐含场景 → B1 同分布
+增益可能 modest——叙事重心放 B3 跨场景适应与 B4 鲁棒性；③ 栅格厚度/分辨率敏感性（消融一项）；
+④ P1 统计若是"场景 id 的代理"则与 one-hot 等价——用 shuffled 对照检测。
+- **D45 Phase B 转向：floorplan_dataset 底料 + DLoc 单数据集试点（2026-11-02，人工指示+方案批准）**：人工指出其此前已建成完整 floorplan 绘制体系（`floorplan_dataset/`= 软链至 /mnt/DataDrive164/wr/floorplan_dataset：FLOORPLAN_SPEC.md 渲染标准 + make_all_floorplans.py + 5 组数据集），指示①完善规范②评估 XRF55 可用性③用该组数据（甚至只用 DLoc）试点。**人工已定**：DLoc 单数据集试点（floorplan 质量最好：0.1m 占据栅格 vs XRF55 照片手绘 ±0.5-1m）；XRF55 降为后续迁移目标（其手绘任务**暂停不删**，floorplans/ 工具链保留待迁移章）。**审计事实**（Explore×2 磁盘核实）：DLoc 8 场景 **108,008 样本**（5 jacobs ×4AP / 3 atkinson ×3AP），每样本 (n_ap,4 天线,234 子载波) 复数单快照、XY 标签现成；文件序=1cm 步进空间游走、时间戳乱序→**划分必须文件序块**；xfi 有 PIL/cv2（仅缺 matplotlib）；磁盘余 34GB→缓存预算 4.5GB。**规范不一致修正**：FLOORPLAN_SPEC.md 画布 560×336→1024×464（与全部 62 张已渲染 PNG 一致）。人工设计问询后确认：**保留全局画布与统一物理尺度原则**（每像素物理距离统一是基座迁移根基）——模型张量沿用 64×29m 世界画布、0.2m 格元、4m patch（128 raster tokens + 4 AP 坐标 token = 132 场景 tokens），`canvas: global|content` 消融键留作空白代价量化。
+
+## 11. Phase B-v2 实现记录：DLoc floorplan 条件化 CSI-JEPA 试点（2026-11-02，方案已批准并实施）
+
+### 11.1 数据与缓存
+
+- `XRF55_HAR/build_dloc_cache.py`：HDF5(v7.3/compound real+imag f8) → 每场景 `data/dloc_cache/CSI_<sc>.npy` (N,**32**,234) float32（4 AP 组 × 8 re/im 交错行；3-AP 补零 + valid_ap 旗标；re/im 保留 AoA 相位梯度与延迟扩展两几何信号、避免相位卷绕；`csi_repr: mag` 单键消融训练侧即时取模）+ sidecar（labels XY 米 / AP 质心 / valid / **P1 统计逐 (AP,频带)，只取文件序前 90%**——零泄漏）。全 8 场景 3.1GB，构建 ~10 分钟（实测）。ap_metadata 质心与审计一致（jacobs: (0,2)/(16.8,7.6)/(6.4,7.6)/(12.4,0)）。
+- `csi_jepa/dloc_data.py`：memmap Dataset/collate（陷阱 9：dataloader 恒原始值）/ 四种划分——**S-INTERP 逐场景文件序连续块 90/10（主口径，随机划分会把 1cm 相邻样本跨 split 虚高）**、S-RAND（文献可比对照）、S-LOSO（训 7 测 jacobs_Aug16_3 全样本）、S-BUILDING（jacobs↔atkinson 互测）；P1 目标表 (8,4,9) 逐场景（train 行=自身块统计；LOSO 下 test 行=train 聚合先验，**P1 迁移诊断=LOSO 下对 test 场景真值的偏离**）。
+
+### 11.2 模型（`csi_jepa/floorplan.py`，组合而非改动——A1 文件零改动）
+
+- **DLocRasterBuilder**：掩码+AP 元数据→(4,160,320)（0.2m 格元；世界画布与渲染 PNG 同框：jacobs 窗 (-10,-5.1)/atkinson (-5,-3.6)，行 0=y_max）；4 通道 occ/SDF(tanh(sdf/1m) 符号距离，亚格元墙距穿池化)/unknown(>1m-from-free 启发式)/AP 高斯(σ=0.5m)；remove_marker_noise 逐字节沿用。
+- **SceneEncoder ≈1.7M**：Conv2d(4,256,20)（4m patch）→ 16×8=128 raster tokens（分解式 pos_row/pos_col）+ 4 AP 连续坐标 token（per-slot query + MLP([x,y,valid])，回归友好米制框架）→ 2×PreLNBlock。**OneHotSceneEncoder** = B2 对照（场景 id 广播替换栅格、AP 坐标保留——"id+坐标"给不了的 = 栅格几何净贡献）。
+- **FPCSIJEPA**：[scene 132; csi 36] = **168-token 单 encoder**（MUSE-FM 可比拼接、场景 tokens 保留到输出）；CSI tokenizer 复用 CSITokenizer(patch (8,26))；`csi_only_view()` 供 CSIEMATargetEncoder 做**场景无关 EMA 目标**（场景分支只经 context 注意力获梯度）。批内唯一场景分组前向（512 份重复栅格不进显存）。可训 8.37M + Predictor 2.15M。
+- **P1Head**：池化场景 tokens → Linear(256→**36**) 预测逐 (AP,频带) 平均 |CSI|（**设计修正**：原案 288=8 场景×4AP×9 频带会在输出层留场景查表槽位——one-hot 也能过；36 维强制"几何→统计"经场景表征传导）。无参数 LN 两侧，λ=0.3 ramp 5。
+
+### 11.3 训练/评估脚本与冒烟发现
+
+- `dloc_csi_pretrain_fp.py` / `dloc_csi_downstream_fp.py`（复制减法）：下游=XY 回归（池化 mean+LN+Linear(256,2)，SmoothL1 β=1m；mean/median 欧氏 + p75/p90 + %<1m + 逐场景表）；三方法 fp_probe/fp_finetune/fp_scratch × 控制组（onehot/shuffled/none 各配自己预训练 run）；`--scene-mode shuffled`（raster 主线 ckpt + 评估期错配）= 严格查表检测；标签效率逐场景嵌套抽样。mirror 配方统一 last-model headline。
+- **冒烟揪出三个 bug（全部修复，CPU/GPU 双路径数值验证）**：
+  1. **潜伏于 A1 的 channel_std 广播 bug**：CSITokenizer 的 inp_mean 形状 (1,1,C,1) 与 (B,C,T) 广播产生 4D (1,B,C,T)——A1 全程 `input_norm: none` 未触发；DLoc 启用 channel_std 即爆。修正 buffer 形状 (1,C,1)（model.py，行为对 A1 无影响）。
+  2. **P1 输出槽位设计错误**（288→36，见 11.2）。
+  3. **损失归一化 ×256**：加权 SmoothL1 分子按 token×dim 元素求和、分母只数 token——损失虚高 256×（127 vs 实际 0.54）；val 同根。修正分母乘 dim。
+- 冒烟终态（3 步×1ep）：loss 0.543（与 CPU 理论 0.53 一致）、p1 0.75、ztgt_std 0.91、scene_std 0.148、val ev 0.65、val_p1 0.65；下游四路径（ft/probe/scratch/shuffled 错配）全通。
+
+### 11.4 规范润色与张量生成器（Task 1 交付）
+
+- `floorplan_dataset/FLOORPLAN_SPEC.md`：画布修正 1024×464（注明由 5G-NR 室内墙环定容+历史误写说明）；新增 **§5b 模型输入张量**（PNG 降级人检/交换产物；0.2m 格元/4m patch 固定物理尺寸、4 通道、AP 连续坐标约定、SDF、增广张量域等价实现）；§5.3 WILD/DLoc 适配器（场景→掩码表、行 0=y_max、3-AP 补零、噪点清除）；§5.4 XRF55 占位（幅度-only、精度最低档标注）。
+- `floorplan_dataset/make_all_tensors.py`：张量缓存生成器（WILD 已实现 29 张→`floorplan/WILD/tensors/` 432KB，抽查 occ/SDF∈[-1,1]/AP 峰 0.98 全正常；h-wild/wild-v2/5g-nr 留扩量期 adapter 桩）。
+
+### 11.5 判门与命令（§11.6）
+
+门槛：**BG1** SSL 健康（无塌缩）；**BG2** floorplan > no-floorplan（定位 probe/ft）；**BG3 floorplan > onehot（防查表，核心成色门）**；**BG4 floorplan > shuffled（几何特异性）**；BG5（可选）标签效率。预注册：同分布增益可能 modest（CSI 已隐含场景身份），价值主张在 BG3/BG4 成色与跨场景（LOSO/楼间）。
+
+### 11.6 完整命令（复制即用；先 nvidia-smi 挑卡；4 场景模式预训练 ≈14-20h 总量，可双卡分摊）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+# ---- 预训练（~3-5h/run；缓存已建好勿重跑；4 个 config 就绪：raster 主线 + none/onehot/shuffled 对照）
+CUDA_VISIBLE_DEVICES=<卡A> conda run -n xfi --no-capture-output python dloc_csi_pretrain_fp.py \
+    --config configs/dloc_jepa_fp.yaml --run-name FP_raster_interp                     # 主线
+CUDA_VISIBLE_DEVICES=<卡B> conda run -n xfi --no-capture-output python dloc_csi_pretrain_fp.py \
+    --config configs/dloc_jepa_fp_none.yaml --run-name FP_none_interp                  # BG2 对照
+# 等卡空出，逐个跑：
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_pretrain_fp.py \
+    --config configs/dloc_jepa_fp_onehot.yaml --run-name FP_onehot_interp              # BG3 对照
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_pretrain_fp.py \
+    --config configs/dloc_jepa_fp_shuffled.yaml --run-name FP_shuffled_interp          # BG4 对照
+```
+
+注①：scene_mode 变体走 config（`configs/dloc_jepa_fp_{none,onehot,shuffled}.yaml`，逐键复制唯 scene_mode 不同）；shuffled 的场景错配在数据编排层实现、模型仍是 raster 结构。所有预训练 run 产物 ≈0.2GB/run，磁盘预算内。
+
+```bash
+# ---- 下游（等对应预训练完成；P=对应 ckpt 路径）
+P=./dloc_checkpoints/FP_raster_interp/epoch_100.pth
+# 主口径：raster 预训 + 正确 floorplan
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_finetune --pretrained $P --run-name FP_ft_raster
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe   --pretrained $P --run-name FP_probe_raster
+# BG4 严格查表检测：raster 主线 ckpt + 评估期错配
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe --pretrained $P --scene-mode shuffled --run-name FP_probe_SHUFFLED
+# BG2/BG3 对照（各配对应 ckpt；scene_mode 从 ckpt 内嵌 config 自动恢复）：
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_finetune --pretrained ./dloc_checkpoints/FP_none_interp/epoch_100.pth \
+    --run-name FP_ft_none
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_finetune --pretrained ./dloc_checkpoints/FP_onehot_interp/epoch_100.pth \
+    --run-name FP_ft_onehot
+# scratch 下界（无预训练）：
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_scratch --run-name FP_scratch
+# 划分对照与跨场景（预训练也需对应 split 重跑，如 FP_raster_loso）：
+#   --split rand / loso / building（预训练与下游成对指定）
+# 标签效率：--label-fraction 0.1/0.05/0.01（嵌套，各方法同样本）
+```
+- **D46 FP_ft_onehot 下游报错修复（2026-11-03，人工执行遇错，agent 修复+冒烟验证）**：`dloc_csi_downstream_fp.py` 的训练循环与 evaluate() 直接调 `encoder.scene(...)`、漏了 onehot 分支的 `scenario_id` 实参（预训练侧有 `forward_scene_grouped` 分支处理、下游复制减法时遗漏）→ `TypeError: OneHotSceneEncoder.forward() missing 1 required positional argument`。修复：抽 `scene_tokens_for(encoder, ...)` 统一两处调用（onehot 传 uniq 作 id，其余同前）；借 FP_onehot_interp 真实 ckpt 冒烟（2 步全链路）通过。**其余 run 均成功不受影响**（raster/shuffled/none 不走该分支）。人工只需重跑 FP_ft_onehot 一条命令（§11.6）。
+- **D47 Phase B-v2 试点结果与判门（2026-11-03，人工执行 §11.6，结果目录 `dloc_eval_results/{FP_ft_raster, FP_probe_raster, FP_probe_SHUFFLED, FP_ft_none, FP_ft_onehot, FP_scratch}` + `dloc_checkpoints/FP_*`）**：
+  - **定位误差总表（S-INTERP，mean/median 米 / %<1m）**：FP_ft_raster 3.97/3.50/6.0%；FP_probe_raster **3.71**/3.50/5.3%（全场最佳）；FP_probe_SHUFFLED 3.70/3.49/5.3%（错配评估）；FP_ft_none 4.00/3.65/4.9%；FP_ft_onehot 3.95/**3.44**/6.6%；FP_scratch 4.03/3.55/5.7%。
+  - **判门：BG1 过；BG2/BG3/BG4 未过（同分布）**。BG1：raster SSL 健康（val ev 0.994、无塌缩、scene_std 0.15→0.75）；预训练整体弱正（ft raster 3.97 > scratch 4.03，probe raster 3.71 最佳）。BG2：ft 口径 3.97 vs 4.00（噪声内）。**BG3：onehot ≈ raster（median 反而略优 3.44 vs 3.50）——"id+AP 坐标"已吃满同分布可用的场景信息，栅格几何零净贡献**。**BG4：probe raster 3.71 vs 错配评估 3.70——逐位噪声级，定位头完全未使用 floorplan 内容**。
+  - **机制诊断（预训练轨迹，信息量大）**：① P1 是有效的内容判别器——raster val_p1 0.199→**0.011**（几何→统计映射在同分布学到了）、onehot →0.0001（id 记忆，如预注册）、**shuffled 卡死 0.072（=聚合先验地板，从未下降）**—— shuffled-P1 的设计目的达成。② **错配 floorplan 主动伤害 SSL**：shuffled 预训 val ev 0.87-0.90 vs raster 0.994（互相冲突的几何先验污染上下文）。③ onehot SSL 后期退化（ev 0.98→0.82）。④ probe(3.71) < ft(3.97)：mirror 微调再次过适应（D39"丰富表征需更短适应预算"的又一例证）。
+  - **同分布负结果的机理**：S-INTERP 下（i）97K 有标签样本已足以直接学 CSI→位置，floorplan 无增量信息；（ii）SSL 掩码频带可由同样本其他频带的带内相关性推出——floorplan 对主目标是冗余的（P1 是唯一需要几何的通路，且其受益可被 id 记忆替代）；（iii）池化 mean 头稀释场景 tokens。
+  - **与预注册一致**：§11.5 预注册"同分布增益可能 modest（CSI 已隐含场景身份），价值主张在跨场景"。同分布已定性；**未跑的决定性轴 = LOSO/楼间**（新场景 CSI 无法携带环境几何 → floorplan 先验才有位置）。待人工决策：A 跑 LOSO/楼间 2×2（raster vs none 预训 + 零样本/10% 适配，~8-12h）；B 零训练成本头改造诊断（场景 token 不进池化、改 FiLM/拼接回归头，现有 ckpt 即可）；C SSL 任务改造（跨样本 masked-band 预测强制环境级知识，设计迭代）；D FP_probe_none 补全 BG2 probe 侧（~1-2h）。
+- **D48 A+D 排程与实现（2026-11-03，人工批准"A+D"）**：① D = FP_probe_none（BG2 probe 侧补全，借现有 FP_none_interp ckpt，~1-2h）；② A = LOSO 2×2 决定性实验——新增 `configs/dloc_jepa_fp{,_none}_loso.yaml`（逐键复制唯 split=loso：SSL 语料 = 7 场景 89,328 样本，held-out jacobs_Aug16_3 贡献 0 样本）；`dloc_csi_downstream_fp.py` 新增 `--adapt-fraction X`（held-out 场景文件序**前缀连续条带**并入训练——与评估区空间不重叠，游走顺序保证；JSON 记录 adapt_fraction/n_adapted）。索引逻辑已验证（89,328/8,754；10% 适配 = 875 条连续块），1 步 GPU 冒烟通过。判定约定：raster 在零样本 probe 与 10% 适配双口径 < none → floorplan 跨场景先验成立；若双口径均不赢 → 跨场景亦证伪，转 C（SSL 任务改造）或调整叙事。零样本 probe 定义：held-out 场景贡献 0 训练样本、头仍在 7 场景上训练。命令见 §11.7。
+
+### 11.7 D48 完整命令（复制即用；先 nvidia-smi 挑卡）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+# ---- D：BG2 probe 侧补全（~1-2h，借现有 interp ckpt）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe --pretrained ./dloc_checkpoints/FP_none_interp/epoch_100.pth \
+    --run-name FP_probe_none
+```
+
+```bash
+# ---- A：LOSO 预训练 ×2（双卡并行，~3-5h/run；held-out 场景零样本）
+CUDA_VISIBLE_DEVICES=<卡A> conda run -n xfi --no-capture-output python dloc_csi_pretrain_fp.py \
+    --config configs/dloc_jepa_fp_loso.yaml --run-name FP_raster_loso
+CUDA_VISIBLE_DEVICES=<卡B> conda run -n xfi --no-capture-output python dloc_csi_pretrain_fp.py \
+    --config configs/dloc_jepa_fp_none_loso.yaml --run-name FP_none_loso
+# ---- A：LOSO 下游 ×4（等预训练完成）
+PR=./dloc_checkpoints/FP_raster_loso/epoch_100.pth
+PN=./dloc_checkpoints/FP_none_loso/epoch_100.pth
+# 零样本 probe（held-out 场景 0 训练样本，头在 7 场景上训）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe --split loso --pretrained $PR --run-name FP_probe_raster_loso
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe --split loso --pretrained $PN --run-name FP_probe_none_loso
+# 10% 适配微调（held-out 场景前缀条带并入训练，mirror 配方）
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_finetune --split loso --pretrained $PR --adapt-fraction 0.1 \
+    --run-name FP_ft_raster_loso_adapt10
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_finetune --split loso --pretrained $PN --adapt-fraction 0.1 \
+    --run-name FP_ft_none_loso_adapt10
+```
+- **D49 A+D 结果与判读（2026-11-04，人工执行 §11.7，结果目录 `dloc_eval_results/{FP_probe_none, FP_probe_raster_loso, FP_probe_none_loso, FP_ft_raster_loso_adapt10, FP_ft_none_loso_adapt10}`）**：
+  - **D（BG2 probe 侧补全）**：FP_probe_none 3.74m vs FP_probe_raster 3.71m——噪声级，与 D47 一致；同分布 BG2 双口径至此完整定性：floorplan 内容零净贡献。
+  - **A（LOSO，预注册决定性轴）**：零样本 probe **raster 4.76/4.74m vs none 4.98/5.14m（mean −4.4%、median −7.8%）——Phase B 首个正向信号**：未见场景上几何条件化表征迁移更好，预注册假设获得首个支持。10% 适配 ft 反而 none 大胜（7.46 vs 5.17）——**但该读数被已知配方混杂污染**：两场适配 ft 都比各自的零样本 probe 更差（7.46>4.76；5.17>4.98），mirror 恒定 lr×100ep 全解冻再次"过写"预训练表征（D39 模式第三次复现；表征越丰富越易被侵蚀 → raster 受害更重）。适配实验当前无法度量 floorplan 的适配价值。
+  - **LOSO 预训练健康**（BG1-LOSO 过）：raster P1 train 0.27→0.0008、scene_std 0.55、无塌缩；none ev 0.997。附注：raster 的 SSL val（ev 0.94）持续劣于 none（0.997）——场景条件化使 SSL 主任务更难，但其表征零样本迁移更好；又一例"SSL 指标 ≠ 下游价值"（D31 先例）。
+  - **缺口与下一步（待人工决策）**：干净的适配读数缺失——**fp_probe + adapt-fraction**（冻结 encoder、只训头于 7 场景+875 目标场景样本，无表征侵蚀）× raster/none ≈ 各 1-2h，是"floorplan 是否帮助未见场景适配"的决定性读数；另可选楼间 holdout（jacobs↔atkinson，4AP→3AP 零填充机制已就位）作更强跨楼型检验。效应量注记：零样本优势 0.2-0.4m（基线 4.8m 的 4-8%）真实但温和，且单场景 LOSO 限制外推声明强度。
+- **D50 冻结适配结果与 Phase B-v2 试点总结论（2026-11-04，人工执行，结果目录 `dloc_eval_results/FP_probe_{raster,none}_loso_adapt10`）**：
+  - **冻结适配（只训头，无表征侵蚀）**：raster 5.46/5.55m（%<1m **6.8%**）vs none 4.97/5.24m（3.1%）——mean/median 上 none 反超（适配把 raster 的零样本优势反转：4.76→5.46 劣化、none 持平 4.98→4.97）；唯一 raster 占优的是 %<1m 翻倍（6.8% vs 3.1%）但伴随 p90 恶化（6.55→8.69，误差分布双极化——875 目标样本教会头"局部尺度"却也引入新的大误差）。
+  - **LOSO 全景表（held-out jacobs_Aug16_3，mean/median m）**：零样本 raster **4.76/4.74** < none 4.98/5.14（唯一稳定正向，−4.4%/−7.8%）；冻结适配 none 4.97 < raster 5.46；全解冻适配（混杂）none 5.17 < raster 7.46。
+  - **预注册判定兑现**：按 D48 约定"冻结适配下反超 → 跨场景整体证伪"——零样本正信号（4-8%）未能存活到适配协议；**floorplan 先验的可用价值当前局限于零样本迁移**，适配场景下无增益甚至有害（两种适配协议一致）。
+  - **试点总结论（诚实版）**：① 机制层——P1 几何→统计通路真实存在且可判别（shuffled 卡死地板、raster 同分布学到、onehot 走 id 记忆捷径）；场景条件化表征的**零样本跨场景迁移**显著更好；② 价值层——同分布零贡献（BG2/3/4 未过）、适配负贡献（D50），可用增益仅限"零标签跨场景"一档；③ 效应量 4-8% 真实但温和，单场景 LOSO 限制外推强度。
+  - **决策分支（待人工）**：C = SSL 跨样本任务改造（同场景另一样本的 floorplan+CSI 预测本样本被掩频带——强制环境级知识，对症 D47 机理：带内相关性让 floorplan 对主目标冗余；设计+实现+预训+下游 ≈ 1-2 天）；或 B 残项 = 场景感知头诊断（FiLM/拼接替代池化，现有 ckpt 零预训成本 ~2h）；或叙事定稿 = "零样本迁移价值 + 机制研究"收笔 Phase B、floorplan 主战场移交多数据集扩量（H-WILD/WILD-v2/5G-NR 张量桩已就位）与 XRF55 迁移章。

@@ -1,0 +1,51 @@
+seed: 3407
+data:
+  cache_root: ../data/dloc_cache
+  batch_size: 512
+  num_workers: 4
+  val_split: 0.05       # SSL 诊断 val：逐场景 train 块尾部 5%（连续块）
+  split: interp         # interp | rand | loso | building（--split 可覆盖）
+  pin_memory: false
+  prefetch_factor: 2
+model:
+  dim: 256
+  depth: 8
+  num_heads: 4
+  ffn_dim: 1024
+  dropout: 0.0
+  scene_mode: raster    # raster | shuffled | onehot | none（对照组各一 config/覆盖）
+  canvas: global        # global 64x29m（规范同框）| content 40x20m（空白 token 代价消融）
+  raster_patch: 20      # 4m = 20 格元（cell 0.2m）
+  csi_repr: reim        # reim（32 行）| mag（16 行，单键消融）
+  input_norm: channel_std
+  predictor:
+    depth: 4
+    num_heads: 4
+    ffn_dim: 512
+    dropout: 0.0
+optim:
+  lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  epochs: 100
+ema:
+  base_momentum: 0.996
+mask:
+  token_mask_rate: 0.5
+  rect_c: 1             # 一 AP x 2 频带的矩形块（快照数据：无时间轴，rect_t=子载波频带）
+  rect_t: 2
+  link_dropout_prob: 0.3  # 整 AP 行掩（WiFi-JEPA link-mask 对应物）
+  scene_token_dropout: 0.0
+p1:
+  weight: 0.3
+  ramp_epochs: 5
+log:
+  save_dir: ./dloc_checkpoints
+  save_every_epochs: 25
+  log_masks_first_epoch: true
+_variant: "Phase B-v2 (PROJECT_LOG §11): DLoc floorplan-conditioned CSI-JEPA pilot.\
+  [scene 132; csi 36] = 168-token single encoder, scene tokens retained at output;\
+  EMA target = CSI-only (scene branch learns only via context attention). P1 aux:\
+  pooled scene tokens -> per-(scenario, AP, band) mean |CSI| (train-block stats,\
+  parameter-free LN both sides). Controls (each = own pretrain run): shuffled\
+  (floorplan mismatch), onehot (id replaces raster), none (CSI-only)."
