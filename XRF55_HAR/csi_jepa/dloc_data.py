@@ -75,10 +75,14 @@ class DLocCorpus:
             note = f'leave-one-scenario-out: test={TEST_SCENARIO_LOSO} (all samples)'
         elif mode == 'building':
             for sc in SCENARIOS:
-                a, _ = self._bounds(sc)
                 off = self.scen_offset[SCENARIO_ID[sc]]
-                (tr if BUILDING[sc] == 'jacobs' else te).extend(off + i for i in a)
-            note = 'train=jacobs(5 scenarios, 90% blocks) test=atkinson(3 scenarios)'
+                if BUILDING[sc] == 'jacobs':
+                    a, _ = self._bounds(sc)
+                    tr.extend(off + i for i in a)
+                else:
+                    # atkinson 从不进训练、无泄漏之虞 → 全量入测（勿截 90%）
+                    te.extend(off + i for i in range(self.scen_samples[SCENARIO_ID[sc]]))
+            note = 'train=jacobs(5 scenarios, 90% blocks) test=atkinson(3 scenarios, ALL)'
         else:
             raise ValueError(mode)
         return sorted(tr), sorted(te), note

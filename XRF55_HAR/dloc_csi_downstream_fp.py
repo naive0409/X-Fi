@@ -43,9 +43,52 @@ class LocalHead(torch.nn.Module):
         self.norm = torch.nn.LayerNorm(dim)
         self.fc = torch.nn.Linear(dim, num_classes)
 
-    def forward(self, tokens):
+    def forward(self, tokens, n_scene=0):
         x = torch.mean(tokens, dim=1)
         return self.fc(self.norm(x))
+
+
+class SplitPoolHead(torch.nn.Module):
+    """B 残项诊断头（D51）：CSI tokens 与场景 tokens 分池化、各自 LN 后拼接 -> Linear。
+    消除全局 mean 对场景信息的稀释；n_scene=0 时退化（占零维不进有效通路）。"""
+
+    def __init__(self, dim=256, num_classes=2):
+        super(SplitPoolHead, self).__init__()
+        self.norm_c = torch.nn.LayerNorm(dim)
+        self.norm_s = torch.nn.LayerNorm(dim)
+        self.fc = torch.nn.Linear(2 * dim, num_classes)
+
+    def forward(self, tokens, n_scene=0):
+        c = self.norm_c(torch.mean(tokens[:, n_scene:], dim=1))
+        if n_scene > 0:
+            s = self.norm_s(torch.mean(tokens[:, :n_scene], dim=1))
+            x = torch.cat([c, s], dim=-1)
+        else:
+            x = torch.cat([c, torch.zeros_like(c)], dim=-1)   # 维度对齐（占零不进 fc 有效通路）
+        return self.fc(x)
+
+
+class FiLMHead(torch.nn.Module):
+    "B 残项诊断头（D51）：场景池化向量生成 FiLM (γ,β) 调制 CSI 池化特征 -> Linear。"
+    "让场景信息以逐维调制（而非池化平均稀释）进入回归。n_scene=0 时退化为 pool 头。"
+
+    def __init__(self, dim=256, num_classes=2):
+        super(FiLMHead, self).__init__()
+        self.norm_c = torch.nn.LayerNorm(dim)
+        self.norm_s = torch.nn.LayerNorm(dim)
+        self.film = torch.nn.Linear(dim, 2 * dim)
+        self.fc = torch.nn.Linear(dim, num_classes)
+
+    def forward(self, tokens, n_scene=0):
+        c = self.norm_c(torch.mean(tokens[:, n_scene:], dim=1))
+        if n_scene > 0:
+            gamma, beta = self.film(self.norm_s(torch.mean(tokens[:, :n_scene], dim=1)))\
+                .chunk(2, dim=-1)
+            c = c * (1.0 + gamma) + beta
+        return self.fc(c)
+
+
+HEADS = {'pool': LocalHead, 'split': SplitPoolHead, 'film': FiLMHead}
 
 
 def build_encoder(model_cfg, device, grid_hw):
@@ -94,7 +137,7 @@ def evaluate(model, head, loader, device, raster_gpu, cents_gpu, valid_gpu,
         scen_eff = scen[perm] if perm is not None else scen
         z_ctx = model(csi, scene_tokens=scene_tokens_for(model, raster_gpu, cents_gpu,
                                                          valid_gpu, scen_eff))
-        preds.append(head(z_ctx).cpu().numpy())
+        preds.append(head(z_ctx, n_scene=model.n_scene_tokens).cpu().numpy())
         labels.append(batch['label_xy'].numpy())
     return np.concatenate(preds), np.concatenate(labels)
 
@@ -117,6 +160,9 @@ def main():
     parser.add_argument('--adapt-fraction', type=float, default=0.0,
                         help='LOSO/楼间适配：把 held-out 场景文件序前 X%% 样本并入训练（连续空间'
                              '条带，与评估区不重叠）；0=零样本 probe（默认）')
+    parser.add_argument('--head-arch', type=str, default='pool', choices=list(HEADS),
+                        help='诊断头结构（D51 B 残项）：pool=现行（逐位一致）；split=双池化拼接；'
+                             'film=场景向量调制 CSI 池化。仅影响新训的头，encoder 权重不变')
     parser.add_argument('--save-json', type=str, default=None)
     parser.add_argument('--run-name', type=str, default=None)
     args = parser.parse_args()
@@ -232,8 +278,9 @@ def main():
                              num_workers=n_workers, collate_fn=dloc_collate,
                              persistent_workers=n_workers > 0)
 
-    # ---- 训练头（probe）或头+encoder（finetune/scratch）
-    head = LocalHead(int(model_cfg['dim'])).to(device)
+    # ---- 训练头（probe）或头+encoder（finetune/scratch）；head_arch 为 D51 诊断变量
+    head = HEADS[args.head_arch](int(model_cfg['dim'])).to(device)
+    print(f'head arch: {args.head_arch}')
     torch.manual_seed(cfg['seed'] + 100)
     finetuning = args.method in ('fp_finetune', 'fp_scratch')
     stage = cfg['finetune'] if finetuning else cfg['linear_probe']
@@ -276,7 +323,8 @@ def main():
             labels_xy = batch['label_xy'].to(device)
             z_ctx = encoder(csi, scene_tokens=scene_tokens_for(
                 encoder, raster_gpu, cents_gpu, valid_gpu, scen))
-            loss = F.smooth_l1_loss(head(z_ctx), labels_xy, beta=1.0)
+            loss = F.smooth_l1_loss(head(z_ctx, n_scene=encoder.n_scene_tokens),
+                                    labels_xy, beta=1.0)
             if not torch.isfinite(loss):
                 print(f'[warn] non-finite loss at epoch {epoch + 1} step {i}; skipping')
                 continue
@@ -328,6 +376,7 @@ def main():
         json.dump({'run_name': run_name, 'method': args.method,
                    'scene_mode': args.scene_mode or scene_mode,
                    'eval_scene_perm': eval_scene_perm,
+                   'head_arch': args.head_arch,
                    'pretrained': args.pretrained, 'split': split_mode,
                    'adapt_fraction': adapt, 'n_adapted': n_adapted,
                    'label_fraction': label_fraction, 'n_train': len(train_idx),

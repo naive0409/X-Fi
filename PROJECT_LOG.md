@@ -998,3 +998,52 @@ CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi
   - **预注册判定兑现**：按 D48 约定"冻结适配下反超 → 跨场景整体证伪"——零样本正信号（4-8%）未能存活到适配协议；**floorplan 先验的可用价值当前局限于零样本迁移**，适配场景下无增益甚至有害（两种适配协议一致）。
   - **试点总结论（诚实版）**：① 机制层——P1 几何→统计通路真实存在且可判别（shuffled 卡死地板、raster 同分布学到、onehot 走 id 记忆捷径）；场景条件化表征的**零样本跨场景迁移**显著更好；② 价值层——同分布零贡献（BG2/3/4 未过）、适配负贡献（D50），可用增益仅限"零标签跨场景"一档；③ 效应量 4-8% 真实但温和，单场景 LOSO 限制外推强度。
   - **决策分支（待人工）**：C = SSL 跨样本任务改造（同场景另一样本的 floorplan+CSI 预测本样本被掩频带——强制环境级知识，对症 D47 机理：带内相关性让 floorplan 对主目标冗余；设计+实现+预训+下游 ≈ 1-2 天）；或 B 残项 = 场景感知头诊断（FiLM/拼接替代池化，现有 ckpt 零预训成本 ~2h）；或叙事定稿 = "零样本迁移价值 + 机制研究"收笔 Phase B、floorplan 主战场移交多数据集扩量（H-WILD/WILD-v2/5G-NR 张量桩已就位）与 XRF55 迁移章。
+- **D51 B 残项实现：场景感知头诊断（2026-11-04，人工批准"B 先行"）**：`dloc_csi_downstream_fp.py` 新增 `--head-arch pool|split|film`（pool=现行逐位一致；split=CSI/场景分池化各 LN 拼接→Linear，消除全局 mean 稀释；film=场景池化向量生成 (γ,β) 逐维调制 CSI 池化特征）。film 头 2 步冒烟通过；json 新增 head_arch 字段。**实验矩阵（LOSO 冻结适配 10%，4 run ≈4-8h 单卡）**：{raster,none}×{split,film}。**预注册判读**：同头口径下 raster < none（mean/median 反转 D50 的 5.46 vs 4.97）→ 池化稀释即阻塞点，修复在头侧、C 优先级降；同头下 raster 仍劣 → 池化假说排除、C（SSL 跨样本任务改造）为唯一出路。命令见 §11.8。
+
+### 11.8 D51 诊断命令（复制即用；单卡顺序 4-8h）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+PR=./dloc_checkpoints/FP_raster_loso/epoch_100.pth
+PN=./dloc_checkpoints/FP_none_loso/epoch_100.pth
+for H in split film; do
+  CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+      --method fp_probe --split loso --pretrained $PR --adapt-fraction 0.1 --head-arch $H \
+      --run-name FP_probe_raster_loso_adapt10_$H
+  CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+      --method fp_probe --split loso --pretrained $PN --adapt-fraction 0.1 --head-arch $H \
+      --run-name FP_probe_none_loso_adapt10_$H
+done
+```
+- **D52 B 残项结果与池化假说排除（2026-11-04，人工执行 §11.8）**：LOSO 冻结适配 10%，mean/median m（%<1m）——pool（D50 基线）raster 5.46/5.55（6.8%）vs none 4.97/5.24（3.1%）；**split** raster 5.61/5.64（5.7%）vs none 4.97/5.24（3.1%）；**film** raster 6.51/6.45（6.3%）vs none 4.97/5.24（3.1%）。**判读：① 池化稀释假说排除**——给头更多场景通路（split）甚至更强调制能力（film）反而单调劣化 raster（5.46→5.61→6.51），none 三头逐位一致（4.97/5.24/7.16/3.1%——n_scene=0 时 split/film 结构性退化，实现自洽验证通过）。② 机理修正：适配失败模式不是"信息被稀释"而是**捷径过拟合**——场景 token 是头在目标标签可用时最有吸引力的记忆捷径（875 条适配样本=单一空间条带，按场景向量记忆条带特化、泛化到条带外即失败），场景通路越大捷径容量越大、泛化越差（film 最差）。③ %<1m 在三种头下一致偏 raster 约 2×（6.8/5.7/6.3 vs 3.1/3.1/3.1）——条件化表征在"近距离精确预测"档位确有真实优势，但伴随重尾。
+  - **按 D51 预注册兑现：池化排除 → C 为唯一出路（在 DLoc-LOSO 评估轴内）**。但建议权衡：适配失败已三种协议×三种头一致（捷径过拟合机理清楚），C（跨样本 SSL）改变的是预训练目标的信息含量，不直接改变适配期的捷径结构——其期望收益主要在放大零样本优势，评估轴仍是已三连败的 LOSO 适配。**候选路线（待人工）**：(a) C 跨样本 SSL 改造（1-2 天，机制补完）；(b) 楼间 holdout（jacobs↔atkinson，跨楼型 gap 远大于同楼 LOSO，代码就位 8-14h，floorplan 假设的更强检验场）；(c) 收笔 DLoc 迭代，叙事定稿为"零样本迁移价值（4-8%）+ 捷径过拟合机理 + P1 判别器"，floorplan 主战场移交多数据集扩量（跨数据集几何 gap 结构性地大，是 floorplan 条件性的真正主场）与 XRF55 迁移章。
+- **D53 (b) 楼间 holdout 排程与实现（2026-11-05，人工批准路线 b）**：新增 `configs/dloc_jepa_fp{,_none}_building.yaml`（逐键复制唯 split=building）。**修正 dloc_data.py 建筑划分缺陷**：atkinson 原也被截 90%（50,755）——atkinson 从不进训练、无泄漏之虞，改为全量入测 56,395（assert 已验证）。语料：jacobs 5 场景 90% 块 46,452（全 4AP）→ 测 atkinson 3 场景 56,395（全 3AP，零填充机制就位）；P1 表 atkinson 行 = jacobs 聚合（跨楼迁移诊断）。**与 LOSO 的关键差异**：跨楼型 gap（布局风格/房间尺寸/材质）≫ 同楼换日期，且 one-hot 场景 id 对未见楼**结构性失效**（id 嵌套未训）——故对照只设 raster vs none（shuffled-building 留作 raster 胜出后的加强检验）。**预注册判读**：跨楼零样本 raster < none 且冻结适配不反转 → floorplan 跨楼型先验成立（Phase B 正向结论升级）；零样本即无差异 → 跨场景证伪扩展到跨楼型，转 C 或收笔（D52 路线）。评估规模注记：56K 测试样本，统计力远强于 LOSO 的 8.7K。命令见 §11.9。
+
+### 11.9 D53 命令（复制即用；预训练 ~1.5-2.5h/run（语料 46K=91 步/ep），双卡并行；下游 56K 测试集评估稍慢）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+# ---- 预训练 ×2（双卡并行）
+CUDA_VISIBLE_DEVICES=<卡A> conda run -n xfi --no-capture-output python dloc_csi_pretrain_fp.py \
+    --config configs/dloc_jepa_fp_building.yaml --run-name FP_raster_building
+CUDA_VISIBLE_DEVICES=<卡B> conda run -n xfi --no-capture-output python dloc_csi_pretrain_fp.py \
+    --config configs/dloc_jepa_fp_none_building.yaml --run-name FP_none_building
+# ---- 下游 ×4（等预训练完成；冻结适配为准——全解冻适配已被 D50 定性为配方病，不再跑）
+PR=./dloc_checkpoints/FP_raster_building/epoch_100.pth
+PN=./dloc_checkpoints/FP_none_building/epoch_100.pth
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe --split building --pretrained $PR --run-name FP_probe_raster_building
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe --split building --pretrained $PN --run-name FP_probe_none_building
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe --split building --pretrained $PR --adapt-fraction 0.1 \
+    --run-name FP_probe_raster_building_adapt10
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi_downstream_fp.py \
+    --method fp_probe --split building --pretrained $PN --adapt-fraction 0.1 \
+    --run-name FP_probe_none_building_adapt10
+```
+- **D54 楼间 holdout 结果与 Phase B-v2 总判读（2026-11-05，人工执行 §11.9，结果目录 `dloc_eval_results/FP_probe_*_building*` + `dloc_checkpoints/FP_*_building`）**：
+  - **结果总表（56K 测试样本，mean/median m / %<1m）**：零样本 raster 6.98/7.27（**0.0%**）vs none **5.22/5.46（2.0%）**——零样本 raster 反而**差 34%**、%<1m 精确为 0（56,395 样本无一 <1m）；适配 10% raster 2.28/2.18（14.0%）vs none 2.33/2.17（13.4%）——**统计平局**（双方都从零样本大幅跃升：6.98→2.28、5.22→2.33）。预训练健康（raster P1 0.49→0.0008、scene_std 0.36、ev 0.97；none ev 0.99）。
+  - **判读：预注册"零样本即无差异→证伪"兑现且更强——不是无差异而是反向**。同楼 LOSO 的零样本优势（+4-8%）在跨楼完全反转：场景编码器学到的是 jacobs 专属的"几何→传播"正则（墙体/材质/风格），套到布局风格不同的 atkinson 上产生系统性误偏（%<1m=0 即其预测分布整体偏移的证据）；而 none 无先验、不犯这个错。适配后两者趋同——875 条目标标签足以让头绕开/覆盖误偏先验，floorplan 既无增益也无伤害。
+  - **Phase B-v2 试点最终图景（三轴完整）**：同分布零贡献（BG2/3/4，D47）→ 同楼换日期零样本 +4-8% 但适配即失（D49/D50）→ 跨楼零样本 −34%、适配平局（本条）。机理链完整：**几何→传播映射是"楼型特定"的——学得会、带不走**；2 栋楼的环境多样性不足以学出可跨风格迁移的几何先验。
+  - **最终建议（c 收笔）落地依据已齐**：DLoc 轴的信息量榨干（三轴×协议×头结构一致）；C（跨样本 SSL）的前提假设（环境级知识可跨楼迁移）被本条直接削弱；floorplan 条件性的真正主场 = **多数据集扩量**（H-WILD/WILD-v2/5G-NR 4+ 环境风格、张量桩已就位——环境多样性才是"学得会且带得走"的结构性前提，且与导师基础模型方向天然对齐）与 XRF55 迁移章。叙事素材完整：机制研究（P1 判别器/场景条件化表征/捷径过拟合/楼型特定先验）+ 诚实的边界刻画，本身即论文可用内容。
