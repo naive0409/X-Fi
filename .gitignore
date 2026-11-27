@@ -153,6 +153,12 @@ data/
 
 test.ipynb
 
+.claude/
+paper/
+sionna/
+sionna-rt/
+sionna_dataset/
+
 XRF55_HAR/csi_eval_results
 XRF55_HAR/csi_jepa_checkpoints
 XRF55_HAR/jepa_checkpoints
