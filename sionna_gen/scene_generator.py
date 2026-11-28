@@ -233,6 +233,7 @@ def generate_scene(scene_id, cfg, out_dirs_map):
                   0.3)
 
     # ---- AP（近墙候选点：4 角内缩 + 4 墙中点；两两距离 >= min(3m, 短边/3)）
+    #      rooms10 布局：恒 1 个 TX（单 TX-SISO 对齐 dataset_10rooms）
     weights = np.asarray(cfg.n_ap_weights, dtype=np.float64)
     n_ap = int(rng.choice(np.arange(cfg.n_ap_min, cfg.n_ap_max + 1), p=weights / weights.sum()))
     inset = 0.5
@@ -249,31 +250,50 @@ def generate_scene(scene_id, cfg, out_dirs_map):
     if not aps:                                       # 防御（理论上不可达）
         aps, n_ap = [(w / 2, d / 2)], 1
 
-    # ---- UE（开放空间拒绝采样；避开全障碍 footprint 外扩 0.15m 与外墙 0.2m）
+    # ---- UE（rooms10：不采静态点，改为解析轨迹——Isaac 回放轨迹的替代品；
+    #      dloc：静态点拒绝采样，保持原样）
     wall_boxes = [_aabb(it['footprint']) for it in items
                   if it['kind'] in ('outer_wall', 'divider', 'partition',
                                     'cylinder', 'furniture')]
     wall_boxes = [(b[0] - 0.15, b[1] - 0.15, b[2] + 0.15, b[3] + 0.15) for b in wall_boxes]
-    ues = []
-    guard = 0
-    while len(ues) < cfg.n_ue and guard < 50 * cfg.n_ue:
-        guard += 1
-        x = float(rng.uniform(0.2, w - 0.2))
-        y = float(rng.uniform(0.2, d - 0.2))
-        if any(b[0] <= x <= b[2] and b[1] <= y <= b[3] for b in wall_boxes):
-            continue
-        ues.append((x, y))
-    assert len(ues) == cfg.n_ue, f'UE 采样不足: {len(ues)}'
+    trajectory = None
+    if cfg.layout == 'rooms10':
+        from .trajectory import generate_trajectory
+        geo = {'room': {'w': w, 'd': d, 'h': h}, 'items': items, 'scene_id': scene_id}
+        trajectory = generate_trajectory(geo, cfg)
+        ues = []
+    else:
+        ues = []
+        guard = 0
+        while len(ues) < cfg.n_ue and guard < 50 * cfg.n_ue:
+            guard += 1
+            x = float(rng.uniform(0.2, w - 0.2))
+            y = float(rng.uniform(0.2, d - 0.2))
+            if any(b[0] <= x <= b[2] and b[1] <= y <= b[3] for b in wall_boxes):
+                continue
+            ues.append((x, y))
+        assert len(ues) == cfg.n_ue, f'UE 采样不足: {len(ues)}'
 
     # ---- metadata
     meta = {
         'scene_id': int(scene_id),
         'seed': scene_seed(cfg, scene_id),
+        'layout': cfg.layout,
         'room': {'w': w, 'd': d, 'h': h, 'wall_thickness': t},
         'items': items,
         'aps': [{'x': float(p[0]), 'y': float(p[1]), 'z': cfg.ap_height_m} for p in aps],
         'ues': [{'x': float(p[0]), 'y': float(p[1])} for p in ues],
     }
+    if trajectory is not None:
+        meta['trajectory'] = trajectory
+        # QC/存档：首快照人体 mesh（RT 求解时人体不在场景内——理想吸收体由
+        # rt_runner 求解后按几何剪枝实现，见 human_occluder 模块 docstring）
+        from .human_occluder import human_center, human_mesh, write_human_ply
+        pos = np.asarray(trajectory['positions'][0])
+        yaw0 = float(trajectory['heading_yaw_rad'][0])
+        hc = human_center(pos[:2], yaw0, cfg.human_offset_m)
+        v, f = human_mesh(hc[0], hc[1], yaw0, cfg.human_profile)
+        write_human_ply(os.path.join(scene_dir, 'human_preview.ply'), v, f)
     with open(os.path.join(scene_dir, 'metadata.json'), 'w') as f:
         json.dump(meta, f, indent=1)
 
@@ -294,8 +314,13 @@ def generate_scene(scene_id, cfg, out_dirs_map):
     with open(os.path.join(scene_dir, 'scene.xml'), 'w') as f:
         f.write('\n'.join(lines))
 
-    print(f'scene_{scene_id}: {len(shapes)} shapes, {len(aps)} AP, {len(ues)} UE '
-          f'-> {scene_dir}')
+    if cfg.layout == 'rooms10':
+        print(f'scene_{scene_id}: {len(shapes)} shapes, TX 1, trajectory '
+              f'{len(trajectory["positions"])} snapshots ({trajectory["type"]}) '
+              f'-> {scene_dir}')
+    else:
+        print(f'scene_{scene_id}: {len(shapes)} shapes, {len(aps)} AP, {len(ues)} UE '
+              f'-> {scene_dir}')
     return meta
 
 

@@ -1,0 +1,7 @@
+# Phase PC 全链路冒烟配置（CPU llvm 后端 / 本机）：极小规模，只验证代码路径
+layout: rooms10
+n_snapshots: 6
+snapshot_rate_hz: 60.0
+samples_per_src: 50
+human_occluder: false
+out_root: /tmp/sionna_smoke

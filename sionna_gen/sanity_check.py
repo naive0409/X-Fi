@@ -171,6 +171,121 @@ def overlay_png(meta, cfg, dirs, h_re, h_im):
     print(f'  overlay -> {os.path.relpath(out)}')
 
 
+def sanity_rooms10(args, cfg, dirs):
+    """rooms10 布局体检：产物齐全 / cir<->csi 恒等 / NMSE≈-SNR / FS 斜率 / LOS 与
+    人体遮挡统计 / env_pc / 轨迹。全部离线（不重新 solve，消费 rt 阶段产物）。"""
+    from .pointcloud_exporter import export_env_pc
+    from .trajectory import blocker_boxes, point_free
+    from .config import BANDWIDTH_PRESETS
+
+    scene_dir = os.path.join(dirs['scenes'], f'scene_{args.scene_id}')
+    scene_out = os.path.join(dirs['dataset'], f'scene_{args.scene_id}')
+    fails = []
+
+    def check(name, ok, detail=''):
+        print(f'  [{"PASS" if ok else "FAIL"}] {name}' + (f' — {detail}' if detail else ''))
+        if not ok:
+            fails.append(name)
+
+    print(f'== sanity (rooms10): scene_{args.scene_id} ==')
+    if not os.path.exists(os.path.join(scene_dir, 'metadata.json')):
+        generate_scene(args.scene_id, cfg, dirs)
+    with open(os.path.join(scene_dir, 'metadata.json')) as f:
+        meta = json.load(f)
+    traj = meta['trajectory']
+
+    # 1) 环境点云
+    pc_path = os.path.join(scene_out, 'env_pc.npz')
+    if not os.path.exists(pc_path):
+        n_full, _ = export_env_pc(scene_dir, pc_path, cfg, args.scene_id)
+        print(f'  （env_pc 缺失，已补导出：{n_full} pts）')
+    with np.load(pc_path) as f:
+        xyz, xyz_fps = f['xyz'], f['xyz_fps']
+        bbox = f['bbox']
+    w, d = meta['room']['w'], meta['room']['d']
+    check('env_pc 形状', xyz.ndim == 2 and xyz.shape[1] == 3
+          and xyz.shape[0] == cfg.pc_full_points, f'{xyz.shape}')
+    check('env_pc bbox 在房间内', bbox[0, 0] >= -1.0 and bbox[1, 0] <= w + 1.0
+          and bbox[1, 2] <= meta['room']['h'] + 1.0, f'{bbox.round(2).tolist()}')
+    cell = 0.2
+    occ_cells = len({(round(x / cell), round(y / cell)) for x, y in xyz[:, :2]})
+    print(f'  env_pc 密度 ~{occ_cells} 个 0.2m 柱, FPS {len(xyz_fps)} pts')
+
+    # 2) radio 产物齐全（cir 不落盘——用户决策；信道元数据在 link_summary.csv）
+    radio = os.path.join(scene_out, 'radio')
+    need = ['csi.npz', 'link_summary.csv', 'run.json']
+    missing = [k for k in need if not os.path.exists(os.path.join(radio, k))]
+    if not os.path.exists(os.path.join(scene_out, 'sidecar_pc.npz')):
+        missing.append('sidecar_pc.npz (scene_out 根)')
+    check('radio 产物齐全', not missing, f'缺 {missing}' if missing else '')
+
+    with np.load(os.path.join(radio, 'csi.npz')) as f:
+        csi = {k: f[k] for k in f.files}
+    import csv as _csv
+    with open(os.path.join(radio, 'link_summary.csv')) as f:
+        link = list(_csv.DictReader(f))
+    T = cfg.n_snapshots
+    check('csi 形状/时长', csi['ideal_csi'].shape == (T, cfg.n_subcarriers)
+          and len(link) == T,
+          f"ideal {csi['ideal_csi'].shape}, link rows {len(link)}")
+
+    # 3) NMSE ≈ -SNR
+    nmse = csi['nmse_db']
+    target = -csi['target_snr_db'].astype(float)
+    check('NMSE ≈ -SNR', bool(np.all(np.abs(nmse - target) < 1.0)),
+          f'nmse {nmse.round(2).tolist()} vs target {target.tolist()}')
+
+    # 4) 自由空间斜率（LOS 快照：sum_path_gain（线性） vs 距离 log-log ≈ -2）
+    dd = np.array([float(r['distance_over_c_ns']) * 0.299792458 for r in link])
+    gain_db = np.array([float(r['sum_path_gain_db']) for r in link])
+    is_los = np.array([r['los'] == '1' for r in link])
+    if is_los.sum() >= 20:                                   # 冒烟规模(少快照/少样本)无统计意义
+        pw = 10.0 ** (gain_db[is_los] / 10.0)
+        s, _ = np.polyfit(np.log(dd[is_los]), np.log(pw), 1)
+        check('自由空间斜率 ≈ -2', abs(s + 2.0) < 0.35,
+              f'slope {s:.2f} @ {int(is_los.sum())} LOS 快照')
+    else:
+        print(f'  [info] LOS 快照仅 {int(is_los.sum())} 个，跳过斜率拟合')
+
+    # 5) LOS / 人体遮挡统计
+    n_los = sum(r['los'] == '1' for r in link)
+    n_blk = sum(r['los_blocked_by_human'] == '1' for r in link)
+    frac_los = n_los / T
+    frac_blk = n_blk / T
+    print(f'  LOS 快照 {n_los}/{T}（{frac_los:.0%}）；'
+          f'人体遮挡 LOS {n_blk}（{frac_blk:.0%}）')
+    if cfg.human_occluder and frac_blk == 0.0:
+        fails.append('human-blockage 无剪枝（顶点缺失或几何未命中——检查 run.json 的 '
+                     'path_vertices_used_for_pruning）')
+
+    # 7) 轨迹自由空间复检（抽 50 点）
+    boxes = blocker_boxes(meta, cfg.traj_clearance_m)
+    pos = np.asarray(traj['positions'])
+    ok_pts = [point_free(p[0], p[1], boxes, w, d) for p in pos[::max(1, T // 50)]]
+    check('轨迹点在自由空间', all(ok_pts), f'{sum(ok_pts)}/{len(ok_pts)}')
+
+    # 8) run.json 快照数一致（cir 不落盘；元数据在 link_summary/run.json）
+    check('link_summary 行数 = 快照数', len(link) == T, f'rows {len(link)}')
+
+    # 9) sidecar / run.json
+    with np.load(os.path.join(scene_out, 'sidecar_pc.npz')) as f:
+        sc = {k: f[k] for k in f.files}
+    check('sidecar p1/p2 形状', sc['p1_stats'].shape == (1, 8)
+          and sc['p2_stats'].shape == (3,), f"p1 {sc['p1_stats'].shape} p2 {sc['p2_stats']}")
+    with open(os.path.join(radio, 'run.json')) as f:
+        run = json.load(f)
+    for k in ('sionna_rt_version', 'tx_xyz_m', 'frequency_hz', 'snapshots',
+              'los_snapshots', 'human_blockage'):
+        if k not in run:
+            fails.append(f'run.json 缺键 {k}')
+    print(f'  run.json: snapshots {run.get("snapshots")}, los {run.get("los_snapshots")}, '
+          f'bandwidth {run.get("bandwidth", {}).get("preset")}, '
+          f'human {run.get("human_blockage") is not None}')
+
+    print(f'\n== sanity 完成：{"全部通过" if not fails else f"{len(fails)} 项 FAIL: {fails}"} ==')
+    return fails
+
+
 def main():
     ap = argparse.ArgumentParser('单场景端到端体检')
     ap.add_argument('--scene-id', type=int, default=0)
@@ -182,10 +297,15 @@ def main():
 
     cfg = load_config(args.config)
     dirs = out_dirs(cfg)
+    if cfg.layout == 'rooms10':
+        os.makedirs(dirs['dataset'], exist_ok=True)
+        sanity_rooms10(args, cfg, dirs)
+        return
+
     for k in ('scenes', 'floorplan_ds', 'tensors', 'cache', 'preview'):
         os.makedirs(dirs[k], exist_ok=True)
     scene_dir = os.path.join(dirs['scenes'], f'scene_{args.scene_id}')
-    cfg.scene_dir = scene_dir                                # 检查函数复用
+    cfg.scene_dir = scene_dir                                # 检查函数复用（deprecated dloc 路径）
 
     print(f'== sanity: scene_{args.scene_id} ==')
     if not os.path.exists(os.path.join(scene_dir, 'metadata.json')):

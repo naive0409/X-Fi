@@ -154,6 +154,7 @@ data/
 test.ipynb
 
 .claude/
+.zcode/
 paper/
 sionna/
 sionna-rt/
@@ -166,5 +167,11 @@ XRF55_HAR/jepa_eval_results
 XRF55_HAR/xfi_baseline_runs/
 XRF55_HAR/dloc_checkpoints
 XRF55_HAR/dloc_eval_results
+XRF55_HAR/pc_checkpoints/
+XRF55_HAR/pc_eval_results/
+
 floorplan_dataset
+3D_dataset
+
 XRF55_HAR/paper/3643543.pdf
+

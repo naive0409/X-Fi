@@ -1,0 +1,56 @@
+seed: 3407
+data:
+  rooms10_root: ../3D_dataset/dataset_10rooms
+  env_cache: ../data/rooms10_cache
+  sionna_root: null            # 大规模生成库就位后填（如 ../sionna_dataset/dataset）
+  snr_tier: 20                 # estimated_csi 的 SNR 档（10/20/30/0）
+  batch_size: 512
+  num_workers: 4
+  val_split: 0.05              # SSL 诊断 val：逐场景 train 块尾部 5%（连续轨迹块）
+  split: interp                # interp（逐场景轨迹前缀块 90/10，主口径）| loso
+  test_scenes: null            # loso 模式的留出场景 key（如 [room3]）
+  cache_max_gb: 6
+  pin_memory: false
+model:
+  dim: 256
+  depth: 8
+  num_heads: 4
+  ffn_dim: 1024
+  dropout: 0.0
+  scene_mode: pc               # pc（主）| shuffled（错配）| onehot（id 对照）| none
+  n_patches: 64                # 环境点云 patch 数（=pc tokens）
+  patch_size: 32               # 每 patch 点数（FPS 中心 + kNN）
+  geo_dropout: 0.0             # Sonata 式几何 dropout（防绝对位置记忆；PG6 消融）
+  target_mode: csi_only        # csi_only（Phase B 验证设计）| dual（Sonata 式对照）
+  p2: {weight: 0.0, }          # P2 路径统计辅助（默认关；PG6 消融开 0.3）
+  center_aux: false            # Point-JMAE 式被掩 patch 中心预测（需 scene_token_dropout>0）
+  center_aux_weight: 0.0
+  predictor:
+    depth: 4
+    num_heads: 4
+    ffn_dim: 512
+    dropout: 0.0
+optim:
+  lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  epochs: 100
+ema:
+  base_momentum: 0.996
+mask:
+  token_mask_rate: 0.5         # CSI token (1x2 频带块) 覆盖率
+  rect_t: 2
+  link_dropout_prob: 0.3       # 整 TX 行掩（单 TX -> 全 8 token）
+  scene_token_dropout: 0.0     # pc token 随机置 mask_token（防场景过度依赖）
+p1:
+  weight: 0.3
+  ramp_epochs: 5
+log:
+  save_dir: ./pc_checkpoints
+  save_every_epochs: 25
+_variant: "Phase PC (PROJECT_LOG §12): point-cloud conditioned CSI-JEPA. CSI=(2,256)\
+  reim snapshots (rooms10/sionna-aligned); scene = 3D point-cloud patches\
+  (FPS+kNN+Mini-PointNet, Point-MAE-style, no dVAE); [pc 64; csi 8] single\
+  encoder; EMA target = CSI-only view (target_mode dual = Sonata-style ablation);\
+  P1 aux: pooled pc tokens -> per-(TX,band) mean|CSI| (param-free LN both sides).\
+  Controls: none / onehot (scene-id lookup) / shuffled (eval-time mismatch)."

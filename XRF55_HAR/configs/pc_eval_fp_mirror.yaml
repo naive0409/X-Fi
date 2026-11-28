@@ -1,0 +1,36 @@
+seed: 3407
+data:
+  rooms10_root: ../3D_dataset/dataset_10rooms
+  env_cache: ../data/rooms10_cache
+  sionna_root: null
+  snr_tier: 20
+  split: interp                # interp（主口径）| loso（--test-scenes 留出）
+  test_scenes: null
+  train_batch_size: 512
+  test_batch_size: 512
+  num_workers: 4
+  cache_max_gb: 6
+model:
+  dim: 256
+  depth: 8
+  num_heads: 4
+  ffn_dim: 1024
+  dropout: 0.0
+  scene_mode: pc               # ckpt 内嵌 config 优先；--scene-mode 可覆盖
+  n_patches: 64
+  geo_dropout: 0.0
+linear_probe:                 # 冻结 encoder + 新头
+  lr: 0.001
+  weight_decay: 0.01
+  epochs: 100
+  warmup_epochs: 0
+  schedule: none
+finetune:                     # mirror 配方（恒定 lr/wd 0.01/无调度/last-model——D28 结论）
+  head_lr: 0.0001
+  backbone_lr: 0.0001
+  weight_decay: 0.01
+  epochs: 100
+  warmup_epochs: 0
+  schedule: none
+log:
+  save_dir: ./pc_eval_results

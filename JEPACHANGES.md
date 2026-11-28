@@ -159,3 +159,22 @@ G1：A1-ft > A1-scratch ≥3pp 且低标签差距扩大（SSL 信号）；G2：A
 4. **P1 输出 36 维**（非逐场景槽位）：场景身份必须经场景表征传导——one-hot 无法通过输出层捷径记忆。
 5. 划分用**文件序连续块**（文件序=1cm 步进游走，随机划分跨 split 泄漏近邻）。
 6. 冒烟修复三 bug：CSITokenizer channel_std 广播 4D（**潜伏于 A1、从未触发**，buffer (1,1,C,1)→(1,C,1)）；P1 槽位设计；加权损失分母缺 dim 因子（×256 虚高）。
+
+## 13. Phase PC 新增文件（2026-11-27；点云条件化，组合而非改动）
+
+| 文件 | 职责 |
+|:--|:--|
+| `csi_jepa/pointcloud.py` | PointPatchTokenizer（Point-MAE 式连续 patch + 度量式位置编码 + Sonata 式 geo_dropout）/ OneHotPatchEncoder（查表对照）/ PCSIJEPA（[pc;csi] 单 encoder + 两种 EMA 视图）/ P1Head·P2Head·CenterAuxHead |
+| `csi_jepa/pc_data.py` | PCSceneCorpus（rooms10 + sionna 两源统一场景表）/ PCDataset（逐快照、场景级惰性缓存）/ interp·loso 划分 / 嵌套标签抽样 |
+| `pc_csi_pretrain.py` | Phase PC 预训练（复制减法母本 = dloc_csi_pretrain_fp.py）：CSI 块掩码 + P1/P2/center_aux + target_mode csi_only/dual + scene_token_dropout |
+| `pc_csi_downstream_fp.py` | 下游 XY 定位（fp_probe/ft/scratch × pool/split/film 头 × shuffled 错配 × 标签效率 × 欧氏指标族） |
+| `build_rooms10_cache.py` | dataset_10rooms lidar 80 帧逐体素(0.1m)中位数融合静态环境点云（≥50% 帧覆盖滤行人）+ FPS |
+| `configs/pc_jepa_{base,none,onehot,shuffled}.yaml` | 预训练主线 + 三对照（逐键复制唯 scene_mode） |
+| `configs/pc_eval_fp_mirror.yaml` | 下游 mirror 配置 |
+| `sionna_gen/{trajectory,human_occluder,pointcloud_exporter}.py` | 解析轨迹（Isaac 替代）/ 8 段人体 mesh + XML transform 注入 / mesh 表面采样 env_pc |
+| `sionna_gen/*`（改造） | rooms10 布局：3.5GHz 单 TX-SISO、轨迹快照、双带宽（narrow 7.68MHz/wide 100MHz 同 solve 双写）、sanity_check rooms10 体检；旧 DLoc 布局 deprecated 未删（`layout: dloc` + legacy yaml） |
+| `SIONNA_PIPELINE.md` | 顶部新增 Phase PC 运行手册 + 环境自检（drjit 需 LLVM≥17、DRJIT_LIBLLVM_PATH、CUDA 后端空转的 CPU 退路） |
+
+对照组方法论延续：onehot（防场景查表）+ shuffled（错配检测）+ none（CSI-only 下界）；
+P1 槽位=频带（防查表）；P1/P2 目标只取前 90% 快照（零泄漏）。判门 PG1–PG6 见
+PROJECT_LOG §12.4（预注册）。

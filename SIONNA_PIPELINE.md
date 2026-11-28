@@ -7,7 +7,77 @@
 
 ---
 
-## 0. 速览
+## ⚡ Phase PC（2026-11-27）——管线已切至 rooms10 对齐布局（新主线）
+
+> **在另一台机器上执行生成？把 [SIONNA_HANDOFF.md](SIONNA_HANDOFF.md)（自包含移交文档：
+> 环境自检/执行序列/QC/回传协议/陷阱清单）交给该机的 coding agent，本文档作背景阅读。**
+>
+> **与旧文档（DLoc 对齐）的关键差异**。旧布局（2.4GHz / 1-4 AP 2×2 UPA / 静态 UE 点 /
+> dloc_cache 同构缓存）deprecated 未删（`layout: 'dloc'` + `legacy_dloc.yaml` 可复现）。
+
+**目标对齐 `3D_dataset/dataset_10rooms`**（用户决策）：3.5GHz、**单 TX-SISO**（TX 近墙角高
+2.12m，UE 单天线高 1.25m）、**UE 轨迹 480 快照 @60Hz**（Isaac 回放轨迹 → 解析轨迹替代，
+`trajectory.py`：直线/折线/平滑随机游走，自由空间避障）、**可选人体遮挡**
+（`human_occluder`：8 段轮廓 mesh 在场景内、逐快照 solve、yaw 跟随轨迹切向；轮廓参数与
+10rooms run.json 逐值同源）、输出与 10rooms **逐键同构**（cir.npz/csi.npz/link_summary.csv/
+run.json）+ 新增 `env_pc.npz`（mesh 表面采样静态环境点云，替代 Isaac lidar）。
+
+| 项 | 值（Phase PC） |
+|---|---|
+| RF | **3.5 GHz、256 子载波 ×30kHz = 7.68MHz**（`--bandwidth narrow`，10rooms 同款）；`wide` 预设 = 256×390.625kHz ≈100MHz（张量形状不变，时延分辨率 130ns→10ns）；**双口径同 solve 顺带写出**（cir 共享，近零成本） |
+| 产物布局 | `sionna_dataset/scenes/scene_<id>/{scene.xml, meshes/, metadata.json(含轨迹), human.ply}`（几何源）+ **`sionna_dataset/dataset/scene_<id>/{env_pc.npz, radio/{csi,csi_<other>,link_summary.csv,run.json}, sidecar_pc.npz}`**（消费层入口，与 10rooms `room<k>/{lidar→env_pc, radio/}` 同构；**cir 不落盘**——用户决策 2026-11-27，逐快照信道元数据在 link_summary.csv） |
+| 双带宽文件 | 主口径 `csi.npz`；另一口径 `csi_wide.npz` / `csi_narrow.npz`（schema 相同，metadata_json 内注 preset） |
+| 人体 | `--human-frac 0.2` 按场景种子确定开关；**每开人体场景 = 1 次 batched solve + T 次逐快照 solve**（GPU 上估 ~5-15 min/场景，见下方成本表） |
+| P1/P2 目标 | `sidecar_pc.npz`：p1_stats (1,8)（逐 TX×8 频带 mean|CSI|，前 90% 快照）+ p2_stats (3)（n_paths/first_delay_ns/mean_gain）——物理辅助监督 |
+| 已知限制 | path_doppler 置零（sionna-rt 2.2 不暴露路径折点坐标，`paths.interactions` 只给物体索引）；人体材质为 ITU 近似（默认 wood），"理想吸收体"以场景内遮挡近似 |
+
+**环境自检（换机器必做；本机两个坑已实测，2026-11-27）**：
+
+```bash
+conda create -n sionna python=3.11 -y && conda run -n sionna pip install sionna-rt==2.2.0 matplotlib scipy
+# 坑①：drjit 需要 LLVM>=17 的共享库（15 编不了 fmaximum 指令；系统 libLLVM-12 被拒绝）：
+conda install -n sionna -c conda-forge -y "libllvm17>=17.0.6,<18"
+# 坑②：sionna-rt 2.2 的 CUDA 后端要求 GPU compute capability >= 7.5（本机 V100=7.0 被静默跳过，
+#       且与 LLVM 缺失叠加曾表现为 import 空转）。生成机的 GPU 需 Turing 及以上（RTX20xx/T4/A100/V100→不行）。
+# 自检（期望：打印 variant OK: cuda_ad_mono_polarized）：
+conda run -n sionna python -c "
+import mitsuba as mi; mi.set_variant('cuda_ad_mono_polarized')
+print('variant OK:', mi.variant())"
+# 本机（V100，无兼容 GPU）的退路 = CPU llvm 后端：慢 ~10-50×，只够冒烟、不够量产——
+CUDA_VISIBLE_DEVICES="" DRJIT_LIBLLVM_PATH=<env>/lib/libLLVM-17.so \
+  python -m sionna_gen.build_cache --config sionna_gen/smoke_rooms10.yaml --num-scenes 1
+# （实测：CPU 6 快照×50 样本全链路 5s/场景；量产 480 快照×1e5 样本必须在兼容 GPU 的生成机）
+```
+
+**Phase PC 运行手册（在生成机上执行；先 `nvidia-smi` 挑卡，`CUDA_VISIBLE_DEVICES=<N>`）**：
+
+```bash
+cd X-Fi   # 仓库根
+# 冒烟（~1 min；极小参数只验证代码路径，产物弃置）
+CUDA_VISIBLE_DEVICES=<N> conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.build_cache --config sionna_gen/smoke_rooms10.yaml --num-scenes 1
+CUDA_VISIBLE_DEVICES=<N> conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.sanity_check --config sionna_gen/smoke_rooms10.yaml --scene-id 0
+# pilot 100 场景（正式参数；估 GPU 1-3 h，rt_timing.csv 校准）
+CUDA_VISIBLE_DEVICES=<N> conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.build_cache --num-scenes 100
+# 扩量 1000-5000（多卡分片：--start/--num-scenes；人体按 20% 场景开）
+CUDA_VISIBLE_DEVICES=<卡A> conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.build_cache --start 100 --num-scenes 1400 --human-frac 0.2
+CUDA_VISIBLE_DEVICES=<卡B> conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.build_cache --start 1500 --num-scenes 1400 --human-frac 0.2
+# 窄带兼容子集（200 场景即可；双口径默认已同 solve 写出，无需单独跑）
+```
+
+成本表（ pilot 实测回填；本机 CPU 冒烟单 solve 0.2s@50 样本/6 快照仅供参考）：
+每场景 = scenes(CPU 秒级) + env_pc(~10s CPU) + solveA(1 次) + [人体场景追加 T 次 solve]。
+磁盘 ≈ 6-10 MB/场景（env_pc 2MB + radio ~4MB + 几何 ~1MB）→ 1000 场景 ≈ 6-10GB，5000 ≈ 30-50GB。
+**QC**：每个 pilot 场景跑 `sanity_check`（9 项：env_pc/cir 形状/cir↔csi 恒等 1e-5/NMSE≈−SNR/FS
+斜率≈−2（LOS≥20）/LOS 统计/轨迹自由空间/多普勒/sidecar）。
+
+---
+
+## 0. 速览（deprecated DLoc 布局速览，Phase PC 见上节）
 
 | 项 | 值 |
 |---|---|

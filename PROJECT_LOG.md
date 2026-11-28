@@ -1047,3 +1047,123 @@ CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python dloc_csi
   - **判读：预注册"零样本即无差异→证伪"兑现且更强——不是无差异而是反向**。同楼 LOSO 的零样本优势（+4-8%）在跨楼完全反转：场景编码器学到的是 jacobs 专属的"几何→传播"正则（墙体/材质/风格），套到布局风格不同的 atkinson 上产生系统性误偏（%<1m=0 即其预测分布整体偏移的证据）；而 none 无先验、不犯这个错。适配后两者趋同——875 条目标标签足以让头绕开/覆盖误偏先验，floorplan 既无增益也无伤害。
   - **Phase B-v2 试点最终图景（三轴完整）**：同分布零贡献（BG2/3/4，D47）→ 同楼换日期零样本 +4-8% 但适配即失（D49/D50）→ 跨楼零样本 −34%、适配平局（本条）。机理链完整：**几何→传播映射是"楼型特定"的——学得会、带不走**；2 栋楼的环境多样性不足以学出可跨风格迁移的几何先验。
   - **最终建议（c 收笔）落地依据已齐**：DLoc 轴的信息量榨干（三轴×协议×头结构一致）；C（跨样本 SSL）的前提假设（环境级知识可跨楼迁移）被本条直接削弱；floorplan 条件性的真正主场 = **多数据集扩量**（H-WILD/WILD-v2/5G-NR 4+ 环境风格、张量桩已就位——环境多样性才是"学得会且带得走"的结构性前提，且与导师基础模型方向天然对齐）与 XRF55 迁移章。叙事素材完整：机制研究（P1 判别器/场景条件化表征/捷径过拟合/楼型特定先验）+ 诚实的边界刻画，本身即论文可用内容。
+
+## 12. Phase PC：CSI + 三维点云条件化 CSI-JEPA（2026-11-27 启动，方案已批准并实施）
+
+### 12.1 转向动机与决策记录（D55）
+
+Phase B-v2 收官（D47–D54）证伪 2D floorplan 条件化后，按最终建议转向**三维环境点云**：
+模型输入 = CSI + 环境三维点云（环境建模用，非人体点云），方法对齐 WWM（arXiv:2603.25216，
+Point-BERT 式原生 3D token）的架构精神，tokenizer 取 **Point-MAE 式连续 patch**（跳过
+dVAE——dVAE 留二期消融；Sonata（CVPR'25）的几何 dropout 与双目标作为借鉴，见 §12.3）。
+不做 2D 投影（JEPA-MSAC 路线弃用）；不做室外数据集（ViWi/Raymobtime 室内无点云已核实弃用；
+MM-Fi LiDAR 为人体裁剪已实测排除）。**用户决策**：下游任务 = 定位（HAR 受限于生成数据暂
+不可行；不做 CSI 预测）；带宽双口径（narrow=10rooms 同款 256×30kHz=7.68MHz；wide=256×
+390.625kHz≈100MHz，同 solve 顺带写出两口径）；人体遮挡保留 + config 开关；sionna_gen 从
+DLoc 对齐改为 **dataset_10rooms 对齐**（3.5GHz/单 TX-SISO/轨迹快照/人体/run.json 逐键同构）。
+
+### 12.2 数据与生成（交付用户在其他机器执行）
+
+- **dataset_10rooms 本地消费**：`XRF55_HAR/build_rooms10_cache.py`——每房间 80 帧 lidar
+  NPZ（xyz_m 世界坐标）逐体素(0.1m)中位数融合，体素被 ≥50% 帧观测才保留（行人天然滤除：
+  实测 room1 单帧 29.2 万点 → 静态 10,561 点；bbox 精确=房间内尺寸）→
+  `data/rooms10_cache/env_pc_room<k>.npz`（xyz + FPS 2048 + bbox）+ manifest.json。
+  radio/csi.npz 不复制，消费层直读。
+- **大规模库（目标 1000–5000 场景）**：`sionna_gen/` rooms10 布局——scene_generator 增
+  轨迹生成（`trajectory.py` 解析直线/折线/平滑随机游走 + 自由空间避障，seeded 确定性）、
+  env_pc 导出（`pointcloud_exporter.py` mesh 表面采样 40960 点 + FPS 2048）、人体遮挡
+  （`human_occluder.py` 8 段轮廓 mesh + XML transform 注入、逐快照 solve——sionna-rt 2.2
+  不暴露路径折点坐标（`paths.interactions` 只给物体索引），场景内遮挡是唯一物理精确实现；
+  人 solveA(batched 480 RX)+T 次逐快照 solve，`--human-frac` 按场景种子定开关）、rt_runner
+  双带宽输出、sanity_check 9 项体检。产物与 10rooms 同构 → `csi_jepa/pc_data.py` 一套代码
+  读两库。**运行手册与环境自检见 SIONNA_PIPELINE.md 顶部 Phase PC 节**（关键：drjit 需
+  LLVM≥17 共享库，本机 CUDA 后端 init 空转 → CPU llvm 后端冒烟可用
+  `CUDA_VISIBLE_DEVICES="" DRJIT_LIBLLVM_PATH=<env>/lib/libLLVM-17.so`）。
+- **本机冒烟记录（CPU llvm 后端，`sionna_gen/smoke_rooms10.yaml`：6 快照×50 样本）**：
+  全链路 5s/场景；sanity 9 项全 PASS（NMSE≈−SNR 精确、
+  env_pc/bbox/轨迹自由空间通过）；人体开路径通过（系数改变、human_center 正确、本 6 快照
+  恰无人挡 LOS）；双口径验证（primary wide 390625 / other narrow 30000）。修复 3 bug：
+  `_band_freqs` 参数名、`_truncate` 路径数<26 未补零、`--bandwidth` 误改 cfg.delta_f_hz
+  污染另一口径。
+
+### 12.3 模型与训练栈（csi_jepa 组合扩展，原文件零改动）
+
+```
+PointPatchTokenizer   FPS 中心（确定性首点=距质心最远）+ kNN 分组（非学习，逐场景预分组缓存
+                      PatchProvider，与 DLocRasterBuilder 同模式）+ Mini-PointNet per-patch
+                      embed + 度量式位置编码 MLP(中心 xyz 按 bbox 归一化到 [-1,1])；
+                      geo_dropout（Sonata）：训练期以 p 置零中心坐标——防绝对位置记忆捷径
+PCSIJEPA              [pc 64; csi 8] = 72 token 单 encoder（8×PreLNBlock 256/4/1024 + 末端 LN
+                      + CSI mask_token）；CSI tokenizer (2,256) patch(2,32)→grid(1,8)，
+                      channel_std 模型内 buffer；scene_tokens 直通入口（分组编码再 gather）；
+                      csi_only_view()/full_view() 供两种 EMA 目标；6.42M + predictor 2.13M
+对照组                scene_mode = pc | none | shuffled（错配检测）| onehot（id+度量 pos 查表对照）
+EMA 目标              target_mode = csi_only（默认，Phase B 验证设计）| dual（Sonata 式，pc 位置
+                      也进潜空间预测——D47 场景恒定输出风险，仅作对照消融）
+物理辅助              P1：池化 pc tokens→逐(TX,8 频带) mean|CSI|（无参数 LN 两侧 λ0.3 ramp5）；
+                      P2：路径统计 3 维（标准化域，config 门控默认关）；center_aux（Point-JMAE
+                      式被 scene_token_dropout 掩掉的 patch 中心预测，默认关）
+二期备选              dVAE 与 MaskClu 聚类目标（离散化两档）、Point-M2AE 多尺度、Sonata 多阶段
+                      教师自蒸馏、Matterport 真实网格进生成管线
+```
+
+新文件：`csi_jepa/{pointcloud,pc_data}.py`、`pc_csi_pretrain.py`、`pc_csi_downstream_fp.py`、
+`build_rooms10_cache.py`、`configs/pc_jepa_{base,none,onehot,shuffled}.yaml`、
+`configs/pc_eval_fp_mirror.yaml`、`sionna_gen/{trajectory,human_occluder,pointcloud_exporter}.py`
++ smoke yaml×2。数据层 `pc_data.py`：PCSceneCorpus（跨源场景表）+ PCDataset（逐快照样本、
+场景级惰性缓存 + FIFO 淘汰）+ interp/loso 划分（逐场景轨迹前缀块 90/10 主口径）+ 标签效率
+嵌套抽样。
+
+### 12.4 实验矩阵与判门（预注册）
+
+| 门 | 判据 |
+|:--|:--|
+| PG1 SSL 健康 | ztgt_std>0.1、scene_std 存活、P1 下降 |
+| PG2 条件化增益 | pc > none（同分布定位，probe/ft 双口径） |
+| PG3 成色门（核心） | pc > onehot；shuffled 评估期错配检测 |
+| PG4 几何特异性 | pc > shuffled 预训 |
+| PG5 跨场景泛化（价值主场） | leave-rooms-out：零样本 probe + 10% 适配，pc vs none |
+| PG6 消融 | 干净几何(mesh 采样) vs 传感几何(lidar 融合)；宽带↔窄带互迁；人体 on/off；geo_dropout；target_mode dual |
+
+### 12.5 命令手册（训练由人工执行；先 nvidia-smi 挑卡）
+
+```bash
+cd ~/dev/X-Fi/XRF55_HAR
+# 数据准备（✅ 已完成：全 10 房间 env_pc 缓存）
+conda run -n xfi python build_rooms10_cache.py
+# ---- 首轮小实验（10 房间全量 4800 快照）：{pc, none, onehot} 预训练 ≈ 数小时/run
+CUDA_VISIBLE_DEVICES=<卡A> conda run -n xfi --no-capture-output python pc_csi_pretrain.py \
+    --config configs/pc_jepa_base.yaml --run-name PC_pc_interp
+CUDA_VISIBLE_DEVICES=<卡B> conda run -n xfi --no-capture-output python pc_csi_pretrain.py \
+    --config configs/pc_jepa_none.yaml --run-name PC_none_interp
+# onehot/shuffled 等卡空出依次跑（configs/pc_jepa_{onehot,shuffled}.yaml）
+# ---- 下游定位（P=对应 ckpt；mirror 配方统一 last-model headline）
+P=./pc_checkpoints/PC_pc_interp/epoch_100.pth
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python pc_csi_downstream_fp.py \
+    --method fp_probe    --pretrained $P --run-name PC_probe_pc
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python pc_csi_downstream_fp.py \
+    --method fp_finetune --pretrained $P --run-name PC_ft_pc
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python pc_csi_downstream_fp.py \
+    --method fp_probe --pretrained $P --scene-mode shuffled --run-name PC_probe_SHUFFLED
+CUDA_VISIBLE_DEVICES=<卡N> conda run -n xfi --no-capture-output python pc_csi_downstream_fp.py \
+    --method fp_scratch --run-name PC_scratch
+# 跨场景（PG5）：预训练与下游成对换 --split loso --test-scenes room3
+```
+
+### 12.6 冒烟验证记录（Phase 5，agent 执行，产物已清理）
+
+- **模型级（CPU）**：72 token 前向/一步梯度/EMA 钉 eval（momentum 0.996）/strict 往返/
+  geo_dropout 训练态随机性 ✓。
+- **脚本级（GPU0，真实 10 房间数据，2 batch×1 epoch）**：5 个预训练 config
+  {pc,none,onehot,shuffled,dual} 全通——loss 0.26–0.60 有限、ztgt_std 0.26–0.62（>0.1）、
+  scene_std 0–0.55、val ev 0.42–0.73；下游三路径 {fp_probe, fp_scratch, shuffled 错配} 全通
+  + results.json schema 完整（shuffled 与 probe 结果不同 = 错配检测生效）。
+- **冒烟揪出并修复 5 bug**：① pretrain `provider.get(k, corpus_env(key))` 变量名笔误；
+  ② forward_context 在 none 模式返回 tuple；③ `_FullView.forward` 漏 pc 分支拼接（dual
+  目标塌成 8 token）；④ onehot 查表把 per-sample inv 当场景 id（应传 uniq id）；⑤
+  **`scene_tokens_for`/`scene_grouped_inputs` 用场景 id 当批内位置索引 batch['scene_key']——
+  批内前段全为 room1 时所有唯一行拿到 room1 点云**（正确做法 = 按 corpus.scenes[int(u)] 取
+  key；此 bug 曾让 probe(5.97m) 差于 scratch(2.80m)、shuffled 逐位同 probe——修复后
+  shuffled≠probe）。另 PCSIJEPA.forward 补 scene_tokens 直通入口（FPCSIJEPA 同模式）。
+- 原文件零改动核实：csi_jepa/model.py、floorplan.py、dloc_*、jepa_*、X_Fi*.py、utils.py、
+  run.py、validate_all.py、XRF55_Dataset.py、build_dloc_cache.py 均未触碰（git diff 确认）。

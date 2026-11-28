@@ -1,0 +1,7 @@
+# 冒烟变体：人体开（其余同 smoke_rooms10.yaml）
+layout: rooms10
+n_snapshots: 6
+snapshot_rate_hz: 60.0
+samples_per_src: 50
+human_occluder: true
+out_root: /tmp/sionna_smoke_human
