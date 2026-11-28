@@ -1,83 +1,291 @@
-# SIONNA_PIPELINE.md — Sionna 合成 CSI 数据集：工作流与管线说明
+# SIONNA_PIPELINE.md — Sionna 合成 CSI 数据集：管线手册 + 运行手册（唯一维护文档）
 
 > 目的：用 Sionna RT 射线追踪大规模合成多场景室内 WiFi CSI 数据集，解决 DLoc 试点暴露的
 > "2 栋楼 8 场景不够多样" 问题（PROJECT_LOG D53/D54：跨楼零样本 −34% 反转）。方法上复现
 > **MUSE-FM**（arXiv 2509.01967，PDF 在 `paper/muse-fm.pdf`）的数据生成流程，并做 WiFi 化
-> 适配。本文既是**学习文档**（Sionna 怎么用）也是**管线手册**（我们怎么生成）。
+> 适配。本文既是**学习文档**（Sionna 怎么用）也是**管线手册 + 运行手册**（我们怎么生成）。
+>
+> **本文档自包含**：原《SIONNA_HANDOFF.md》（生成机移交文档）已于 2026-11-28 并入下方
+> Phase PC 节并删除，此后**只维护本文档**。给 coding agent 的话：生成机上的唯一任务是
+> 搭环境 → 冒烟 → 体检 → pilot → 批量 1000–5000 场景 + 质检回传；**不要在生成机上训练
+> 任何模型**（训练在训练机的 `xfi` 环境做）；所有命令都在仓库根目录（`X-Fi/`）执行；
+> 开始前通读 §Phase PC 全节。管线代码行为/参数语义读 `sionna_gen/config.py`（GenConfig
+> 注释）；消费层契约读 `XRF55_HAR/csi_jepa/pc_data.py` 模块 docstring；项目背景与判门读
+> PROJECT_LOG §12。
 
 ---
 
-## ⚡ Phase PC（2026-11-27）——管线已切至 rooms10 对齐布局（新主线）
-
-> **在另一台机器上执行生成？把 [SIONNA_HANDOFF.md](SIONNA_HANDOFF.md)（自包含移交文档：
-> 环境自检/执行序列/QC/回传协议/陷阱清单）交给该机的 coding agent，本文档作背景阅读。**
->
-> **与旧文档（DLoc 对齐）的关键差异**。旧布局（2.4GHz / 1-4 AP 2×2 UPA / 静态 UE 点 /
-> dloc_cache 同构缓存）deprecated 未删（`layout: 'dloc'` + `legacy_dloc.yaml` 可复现）。
+## ⚡ Phase PC：rooms10 对齐生成管线（主线）——运行手册（2026-11-28 实测回填）
 
 **目标对齐 `3D_dataset/dataset_10rooms`**（用户决策）：3.5GHz、**单 TX-SISO**（TX 近墙角高
-2.12m，UE 单天线高 1.25m）、**UE 轨迹 480 快照 @60Hz**（Isaac 回放轨迹 → 解析轨迹替代，
-`trajectory.py`：直线/折线/平滑随机游走，自由空间避障）、**可选人体遮挡**
+2.12m，UE 单天线高 1.25m）、**UE 轨迹 480 快照 @60Hz（恒 8s 时窗）**（解析轨迹替代 Isaac
+回放轨迹，`trajectory.py`：直线/折线/平滑随机游走，自由空间避障）、**可选人体遮挡**
 （`human_occluder`：8 段轮廓 mesh 在场景内、逐快照 solve、yaw 跟随轨迹切向；轮廓参数与
-10rooms run.json 逐值同源）、输出与 10rooms **逐键同构**（cir.npz/csi.npz/link_summary.csv/
+10rooms run.json 逐值同源）、输出与 10rooms **逐键同构**（csi.npz/link_summary.csv/
 run.json）+ 新增 `env_pc.npz`（mesh 表面采样静态环境点云，替代 Isaac lidar）。
 
-| 项 | 值（Phase PC） |
-|---|---|
-| RF | **3.5 GHz、256 子载波 ×30kHz = 7.68MHz**（`--bandwidth narrow`，10rooms 同款）；`wide` 预设 = 256×390.625kHz ≈100MHz（张量形状不变，时延分辨率 130ns→10ns）；**双口径同 solve 顺带写出**（cir 共享，近零成本） |
-| 产物布局 | `sionna_dataset/scenes/scene_<id>/{scene.xml, meshes/, metadata.json(含轨迹), human.ply}`（几何源）+ **`sionna_dataset/dataset/scene_<id>/{env_pc.npz, radio/{csi,csi_<other>,link_summary.csv,run.json}, sidecar_pc.npz}`**（消费层入口，与 10rooms `room<k>/{lidar→env_pc, radio/}` 同构；**cir 不落盘**——用户决策 2026-11-27，逐快照信道元数据在 link_summary.csv） |
-| 双带宽文件 | 主口径 `csi.npz`；另一口径 `csi_wide.npz` / `csi_narrow.npz`（schema 相同，metadata_json 内注 preset） |
-| 人体 | `--human-frac 0.2` 按场景种子确定开关；**每开人体场景 = 1 次 batched solve + T 次逐快照 solve**（GPU 上估 ~5-15 min/场景，见下方成本表） |
-| P1/P2 目标 | `sidecar_pc.npz`：p1_stats (1,8)（逐 TX×8 频带 mean|CSI|，前 90% 快照）+ p2_stats (3)（n_paths/first_delay_ns/mean_gain）——物理辅助监督 |
-| 已知限制 | path_doppler 置零（sionna-rt 2.2 不暴露路径折点坐标，`paths.interactions` 只给物体索引）；人体材质为 ITU 近似（默认 wood），"理想吸收体"以场景内遮挡近似 |
+### PC.0 状态一览（2026-11-28）
 
-**环境自检（换机器必做；本机两个坑已实测，2026-11-27）**：
+- **pilot 100 场景已完成并通过全套 QC**（RTX 4090×2，17 分钟；判据与实测见 §PC.3/§PC.4）
+- 下一步：批量 1000–5000 场景（§PC.3 分片命令；实测 1000 场景 ≈3h、5000 ≈15h 双卡；
+  规模与参数待用户确认）
+- **当前生成口径**（本日多轮修复与决策后的最终形态）：房间 w,d 逐场景 U(7,15)m、h=3m；
+  家具 80% wood；LOS/人体遮挡为几何判定标签；solveA 按 `rt_rx_chunk=64` 分块。
+  **此前任何旧口径产物不可比，需重生成。**
+- Phase PC 代码主体在 `3D` 分支（commit ff793c3）；2026-11-28 的 bugfix/口径变更
+  （rt_runner/config/scene_generator/trajectory/sanity_check）落地后待提交固化。
+
+### PC.1 环境搭建与自检（每步必须过，不过不要继续）
 
 ```bash
-conda create -n sionna python=3.11 -y && conda run -n sionna pip install sionna-rt==2.2.0 matplotlib scipy
-# 坑①：drjit 需要 LLVM>=17 的共享库（15 编不了 fmaximum 指令；系统 libLLVM-12 被拒绝）：
+conda create -n sionna python=3.11 -y
+conda run -n sionna pip install sionna-rt==2.2.0 matplotlib scipy
 conda install -n sionna -c conda-forge -y "libllvm17>=17.0.6,<18"
-# 坑②：sionna-rt 2.2 的 CUDA 后端要求 GPU compute capability >= 7.5（本机 V100=7.0 被静默跳过，
-#       且与 LLVM 缺失叠加曾表现为 import 空转）。生成机的 GPU 需 Turing 及以上（RTX20xx/T4/A100/V100→不行）。
-# 自检（期望：打印 variant OK: cuda_ad_mono_polarized）：
-conda run -n sionna python -c "
-import mitsuba as mi; mi.set_variant('cuda_ad_mono_polarized')
-print('variant OK:', mi.variant())"
-# 本机（V100，无兼容 GPU）的退路 = CPU llvm 后端：慢 ~10-50×，只够冒烟、不够量产——
-CUDA_VISIBLE_DEVICES="" DRJIT_LIBLLVM_PATH=<env>/lib/libLLVM-17.so \
-  python -m sionna_gen.build_cache --config sionna_gen/smoke_rooms10.yaml --num-scenes 1
-# （实测：CPU 6 快照×50 样本全链路 5s/场景；量产 480 快照×1e5 样本必须在兼容 GPU 的生成机）
 ```
 
-**Phase PC 运行手册（在生成机上执行；先 `nvidia-smi` 挑卡，`CUDA_VISIBLE_DEVICES=<N>`）**：
-
+**自检 ① GPU 兼容（关键）**——sionna-rt 2.2 的 CUDA 后端要求 **GPU compute capability
+≥ 7.5**（Turing 及以上：RTX 20xx/T4/A100/30xx/40xx 等）。**V100 = 7.0 不支持**（会被静默
+跳过）：
 ```bash
-cd X-Fi   # 仓库根
-# 冒烟（~1 min；极小参数只验证代码路径，产物弃置）
+nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+conda run -n sionna python -c "import mitsuba as mi; mi.set_variant('cuda_ad_mono_polarized'); print('variant OK:', mi.variant())"
+# 期望输出：variant OK: cuda_ad_mono_polarized
+```
+若报 "no compatible CUDA devices" → 这台机器不能做 GPU 生成，换机器，不要用 CPU 退路量产。
+
+**自检 ② 求解速度**——§PC.3 冒烟跑完后看日志末行的 solve 均值：GPU 正常时单场景（极小
+冒烟参数）应亚秒级；若慢 10 倍以上，`mi.variant()` 打印的八成不是 cuda_*，回自检 ①。
+
+**遗留坑（不要重蹈）**：① 系统 `libLLVM-12` 会被 drjit 拒绝、且初始化失败曾表现为
+import 无限空转（100% CPU 不报错）——装 `libllvm17` 后消失；② 训练机（V100）的冒烟命令
+带 `CUDA_VISIBLE_DEVICES=""` 和 `DRJIT_LIBLLVM_PATH=...`，那是强制 CPU 的退路（慢
+~10-50×，只够冒烟），**不要带到生成机**；选卡只用 `CUDA_VISIBLE_DEVICES=<N>`。
+
+### PC.2 管线五分钟理解
+
+```
+python -m sionna_gen.build_cache  的四阶段（各阶段产物已存在即 skip，可断点续跑）：
+  scenes   scene_generator：程序化房间（外壳 w,d 逐场景 U(7,15)m、h=3m；1-2 面贯通带
+           门洞隔墙 + 0-3 隔墙 + 0-2 圆柱 + 0-4 家具，ITU 材质）→
+           scenes/scene_<id>/{scene.xml, meshes/*.ply, metadata.json（含 480 快照解析
+           轨迹）, human.ply}
+  floorplans QC 可选（floorplan PNG，不进消费路径）
+  env_pc   pointcloud_exporter：mesh 均匀表面采样 → dataset/scene_<id>/env_pc.npz
+           （xyz 40960 点 + FPS 2048 + bbox）
+  rt       rt_runner.rooms10：单 TX-SISO × 轨迹 480 快照 → dataset/scene_<id>/radio/
+           {csi.npz, csi_<另一口径>.npz, link_summary.csv, run.json} + sidecar_pc.npz
+```
+
+| 项 | 值（默认，GenConfig 单点真相在 `sionna_gen/config.py`，yaml 可覆盖、未知键报错） |
+|---|---|
+| RF | 3.5GHz、256 子载波；**双口径**：narrow = 30kHz SCS（7.68MHz，10rooms 同款，主口径）+ wide ≈390.625kHz（100MHz）；**一次 solve 双写两个 csi.npz**（cir 共享） |
+| 天线 | 单 TX（近墙角候选点采样、高 2.12m、iso 单天线 V 极化）→ 单 UE RX（高 1.25m） |
+| 轨迹 | 480 快照 @60Hz（恒 8s 时窗），解析直线/折线/平滑随机游走（自由空间避障，名义 0.8 m/s、实际 0.29–0.84） |
+| 房间尺寸 | **w,d 逐场景独立 U(7,15)m、h=3m 固定**（用户决策 2026-11-28；`room_size_range_m` 置 null 回固定 10×10 模式） |
+| 材质 | 类别固定映射：地板/天花 concrete、外墙 brick、隔墙/隔断/圆柱 marble、家具 wood 80%/metal 20%、人体 wood 近似 |
+| 人体 | **默认开**（`human_occluder: true`）：8 段轮廓 mesh 注入场景、逐快照 solve、yaw 跟随轨迹切向；`--human-frac 0.2` = 按场景种子 20% 开（跨分片确定一致，见陷阱 17） |
+| RT | PathSolver(deterministic=True)、max_depth=3、samples_per_src=1e6、LOS+镜面+折射开、漫射/绕射关、`rt_rx_chunk=64` 分块（陷阱 13）、seed = 3407*1000003 + scene_id |
+| LOS 标签 | **几何视线判定**（2026-11-28 重定义，陷阱 5）：`los`/`los_without_human` = 视线相交测试；`los_blocked_by_human` = 人体躯干轴心穿越 |
+| 点云 | 40960 表面采样点 + FPS 2048（模型输入规模） |
+| **不含 cir** | **cir 不落盘（用户决策）**：系数/时延仅在内存用于 CSI 合成与统计；逐快照信道元数据全在 `link_summary.csv` |
+
+**产物清单**（每个场景）：
+```
+sionna_dataset/
+├── scenes/scene_<id>/                    # 几何源（训练侧"干净几何消融"要用，勿删）
+│   ├── scene.xml  meshes/*.ply  metadata.json  human.ply
+├── dataset/scene_<id>/                   # ★ 消费层入口（最终交付物）
+│   ├── env_pc.npz                        # xyz(40960,3) f32 / xyz_fps(2048,3) / bbox(2,3) / meta json
+│   ├── sidecar_pc.npz                    # p1_stats(1,8)（逐 TX×8 频带 mean|CSI|，前 90% 快照）
+│   │                                     # + p2_stats(3)（n_paths/first_delay_ns/mean_gain_db）
+│   └── radio/
+│       ├── csi.npz                       # 主口径（缺省 narrow）：ideal_csi(T,256)c64、
+│       │                                 # estimated_csi(4,T,256)c64（SNR 0/10/20/30dB 档）、
+│       │                                 # subcarrier_hz、noise_variance、nmse_db、metadata_json
+│       ├── csi_wide.npz                  # 另一口径（主口径为 narrow 时；反之 csi_narrow.npz）
+│       ├── link_summary.csv              # 逐快照：时间戳/ue_xyz/los/num_paths/first_path_delay_ns/
+│       │                                 # sum_path_gain_db/human 位姿/los_without_human/
+│       │                                 # los_blocked_by_human
+│       └── run.json                      # 仿真元数据（10rooms 逐键同构 + bandwidth/human/trajectory）
+├── rt_timing.csv                         # 每场景 solve/后处理耗时（成本校准用）
+└── preview/                              # 仅可视化（floorplan PNG 等，不入数据集）
+```
+
+### PC.3 执行序列（按顺序，每步过了再下一步）
+
+**① 冒烟（~1 min，产物弃置）**——极小参数（6 快照 × 50 samples、人体关、写 /tmp），
+只验证代码路径；期望日志末行 `实测单场景 solve 均值 ...s`、exit=0：
+```bash
 CUDA_VISIBLE_DEVICES=<N> conda run -n sionna --no-capture-output \
   python -u -m sionna_gen.build_cache --config sionna_gen/smoke_rooms10.yaml --num-scenes 1
+```
+**② 体检（对冒烟产物）**——期望 `== sanity 完成：全部通过 ==`（自由空间斜率项在冒烟
+规模下会 info 跳过，正常）；再跑人体开变体验证人体路径：
+```bash
 CUDA_VISIBLE_DEVICES=<N> conda run -n sionna --no-capture-output \
   python -u -m sionna_gen.sanity_check --config sionna_gen/smoke_rooms10.yaml --scene-id 0
-# pilot 100 场景（正式参数；估 GPU 1-3 h，rt_timing.csv 校准）
 CUDA_VISIBLE_DEVICES=<N> conda run -n sionna --no-capture-output \
-  python -u -m sionna_gen.build_cache --num-scenes 100
-# 扩量 1000-5000（多卡分片：--start/--num-scenes；人体按 20% 场景开）
-CUDA_VISIBLE_DEVICES=<卡A> conda run -n sionna --no-capture-output \
-  python -u -m sionna_gen.build_cache --start 100 --num-scenes 1400 --human-frac 0.2
-CUDA_VISIBLE_DEVICES=<卡B> conda run -n sionna --no-capture-output \
-  python -u -m sionna_gen.build_cache --start 1500 --num-scenes 1400 --human-frac 0.2
-# 窄带兼容子集（200 场景即可；双口径默认已同 solve 写出，无需单独跑）
+  python -u -m sionna_gen.build_cache --config sionna_gen/smoke_rooms10_human.yaml --num-scenes 1
+# 期望日志含 "human-blocked N"（N≥0 合法，几何判据下人体不一定挡到视线）
+```
+**③ pilot 100 场景（正式参数）**——✅ 2026-11-28 已完成（双卡分片 17 min，QC 全绿）：
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.build_cache --start   0 --num-scenes 50 --stages scenes env_pc rt
+CUDA_VISIBLE_DEVICES=1 conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.build_cache --start 50 --num-scenes 50 --stages scenes env_pc rt
+```
+说明：不带 `--human-frac` 时 `human_occluder` 默认全开（最重路径的成本校准场景）；
+跳过 `floorplans` 阶段以避免多进程并发写 manifest.csv（它本就是 QC 可选、不在消费路径，
+需要时单进程补跑 `--stages floorplans`）。
+
+**pilot 通过判据**：sanity 全 PASS；rt_timing.csv 的 solve 均值稳定（max/min <2×）；
+抽查 csi.npz 的 nmse_db ≈ [0,−10,−20,−30]；抽场景确认 `link_summary.csv` 行数=480 且
+LOS 标签与 metadata 几何一致（los 恒 0 合法——TX 与轨迹被隔墙分隔的锁孔场景；
+几何判定法见陷阱 5）。
+
+**④ 批量 1000–5000 场景（多卡分片；断点安全，中断直接重跑同命令续传）**：
+```bash
+# 例：2 卡分片 4000 场景（各卡 range 不相交；human-frac 各分片保持一致——场景级种子
+# 决定，同一场景 id 在任何分片/重跑下人体开关都相同）
+CUDA_VISIBLE_DEVICES=0 conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.build_cache --start    0 --num-scenes 2000 --human-frac 0.2 \
+  --stages scenes env_pc rt
+CUDA_VISIBLE_DEVICES=1 conda run -n sionna --no-capture-output \
+  python -u -m sionna_gen.build_cache --start 2000 --num-scenes 2000 --human-frac 0.2 \
+  --stages scenes env_pc rt
+# 窄带兼容子集无需单独跑（双口径默认同 solve 双写）
+```
+**⑤ 批量 QC（生成完做一次全量体检扫描）**：
+```bash
+conda run -n sionna python - <<'EOF'
+# 全量轻量 QC：逐场景检查产物齐全 + 行数 + NaN + nmse 口径（不重新 solve）
+import glob, json, os
+import numpy as np
+bad = []
+dirs = sorted(glob.glob('sionna_dataset/dataset/scene_*'))
+for d in dirs:
+    r = os.path.join(d, 'radio')
+    try:
+        need = ['csi.npz', 'link_summary.csv', 'run.json']
+        if any(not os.path.exists(os.path.join(r, f)) for f in need) \
+           or not os.path.exists(os.path.join(d, 'env_pc.npz')) \
+           or not os.path.exists(os.path.join(d, 'sidecar_pc.npz')):
+            bad.append((d, 'missing')); continue
+        with np.load(os.path.join(r, 'csi.npz')) as f:
+            assert np.isfinite(f['estimated_csi']).all()
+            assert f['estimated_csi'].shape[1:] == (480, 256)
+        with open(os.path.join(r, 'link_summary.csv')) as f:
+            assert sum(1 for _ in f) - 1 == 480
+    except Exception as e:
+        bad.append((d, repr(e)[:80]))
+print(f'{len(dirs)} scenes checked, {len(bad)} bad')
+for b in bad[:20]:
+    print(' BAD:', b)
+EOF
 ```
 
-成本表（ pilot 实测回填；本机 CPU 冒烟单 solve 0.2s@50 样本/6 快照仅供参考）：
-每场景 = scenes(CPU 秒级) + env_pc(~10s CPU) + solveA(1 次) + [人体场景追加 T 次 solve]。
-磁盘 ≈ 6-10 MB/场景（env_pc 2MB + radio ~4MB + 几何 ~1MB）→ 1000 场景 ≈ 6-10GB，5000 ≈ 30-50GB。
-**QC**：每个 pilot 场景跑 `sanity_check`（9 项：env_pc/cir 形状/cir↔csi 恒等 1e-5/NMSE≈−SNR/FS
-斜率≈−2（LOS≥20）/LOS 统计/轨迹自由空间/多普勒/sidecar）。
+### PC.4 成本（pilot 100 实测回填 @4090×2，2026-11-28）
+
+| 项 | 估算 | 实测 |
+|---|---|---|
+| scenes 阶段（CPU） | 秒级/场景 | ~1s/场景 |
+| env_pc 阶段（CPU） | ~10s/场景 | ~1–2s/场景 |
+| rt solveA（人体关） | pilot 实测 | **1.08±0.10s**（480RX 分块 8×64@1e6；max/min 1.5x） |
+| rt 人体场景（+480 次逐快照 solve） | 估 5–15 min/场景 @GPU | **实测 ≈16.2±1.0s（human-loop+post）；单场景全程 ≈21s，100 场景双卡 17min**（原估算高估 ~20×） |
+| 磁盘 | ~6–10 MB/场景 → 1000 ≈ 6–10GB，5000 ≈ 30–50GB | dataset ≈9MB/场景 + 几何 ≈0.16MB/场景（区间内） |
+
+推算：**1000 场景 ≈3h、5000 场景 ≈15h**（双卡）。调参入口（`--config <yaml>` 覆盖
+GenConfig，未知键报错）：`samples_per_src`（默认 1e6）、`rt_rx_chunk`（solveA 分块，
+显存吃紧调小）、`n_snapshots`（480）、`traj_speed_m_s`、`pc_full_points/pc_fps_points`、
+`out_root`。**正式库保持默认值**，与 10rooms 口径可比。
+GPU 利用率低（峰值偶到 50%、常态 <10%）是该负载的正常形态：短促 GPU solve 与 CPU 段
+（逐快照 XML 写盘/mitsuba 解析/drjit 读回同步/numpy 合成/写盘）交替；~14GB 常驻显存是
+Dr.Jit 分配缓存，不代表持续计算。
+
+### PC.5 已知事实与陷阱（合并清单，务必读完；标"已修复"的为 2026-11-28 落地）
+
+环境/后端：
+1. **GPU 计算能力 ≥7.5**：V100（7.0）被静默跳过 → 自检 ① 必须先过。
+2. **LLVM**：drjit 需要 `libllvm17`（15 编不了 fmaximum 指令；12 被拒）。缺 LLVM 时
+   症状可能是 import 无限空转而非报错——先装再排障。
+3. **conda run 缓冲**：始终用 `--no-capture-output` + `python -u`，否则 tqdm/日志看不到
+   实时进度。
+
+数据口径（用户决策，勿擅改）：
+4. **cir 不落盘**（2026-11-27）：csi 来自频域合成（内存系数），link_summary 是逐快照
+   标量元数据——两者数值"对不上"是正常的，本就是两路。
+5. **LOS/人体遮挡标签为几何判定**（2026-11-28 重定义）：`los`/`los_without_human` =
+   2D 线段-凸多边形精确相交 + z 区间重叠（家具 ≤0.9m、门楣 ≥2.1m 按高度天然排除，只有
+   贯通全高的隔墙/隔断/圆柱参与）；`los_blocked_by_human` = 视线穿过人体躯干核心
+   （`human_sight_core_frac` × min(横向,前后)半径——10rooms 口径 UE 本体在人体轮廓内
+   （0.14m 旁偏 < 肩宽 0.21m），"线段触及人体"会误判全部视线）。旧实现 min-tau≈d/c
+   （2ns 容差）会把穿墙折射（墙附加时延 ~0.4ns）与掠射反射误标 LOS，pilot 实测 37%。
+   link_summary 三列同名同构，语义以此为准。
+6. **人体实现**：sionna-rt 2.2 的 `paths.interactions` 只给物体索引（不给路径折点坐标），
+   人体遮挡 = **场景内 mesh 逐快照 solve**（人体开时该场景 solve 成本 ≈ 1+480 次）。
+   `run.json` 的 `human_blockage.blocked_snapshots` 与 link_summary 的
+   `los_blocked_by_human` 列是遮挡是否生效的第一判据。
+7. **多普勒**：`path_doppler_hz` 不在本数据集口径里（到达向不可得），link_summary 无此
+   列，run.json 有说明——不要"补"。
+8. **normalize_delays=False** 才保留绝对到达相位（TOF 信息）；True 只留相对时延。
+9. **子载波频点自己构造**（居中式 f_k = fc + (k−(n−1)/2)·Δf）；**天线间距单位是波长**
+   （0.5 = 半波长）；**材质 thickness 与几何厚度一致**（0.1m），否则折射损耗口径错。
+
+管线行为：
+10. **确定性**：PathSolver `deterministic=True` + 每场景独立 seed；同 scene_id 重跑产物
+    逐位一致；各阶段产物已存在即 skip，`--overwrite` 才强制重做，断点续跑安全。
+11. **PlanarArray 必须关键字传参**（位置参数会 TypeError）。
+12. **`--bandwidth` 只切主口径**，另一口径自动同 solve 写出（勿改 cfg.delta_f_hz 来
+    "切换"，会污染另一口径——已修复为 preset 查表，但别绕过）。
+13. **solveA 显存 ∝ rx 数 × samples_per_src**（480 全批量 @1e6 在 24GB 卡实测 OOM）：
+    按 `rt_rx_chunk`（默认 64）分块，deterministic+seed 下分块与全批量**逐位等价**
+    （冒烟 bitwise 校验过）；块内逐 chunk 先 `_truncate` 到 26 槽再拼接。
+14. **人体 solve 必须传含人体 mesh 的场景对象**（曾因闭包误用无人体场景致 blocked 恒 0、
+    人体场景 CSI 与人体关逐位相同——已修复 `_solve(sc_i, 1)` 并以 5 场景验证）。
+15. **人体内联 bsdf id 必须唯一**（曾与场景 wood 家具重名 → Mitsuba duplicate ID 崩溃；
+    已修复：id 加 `_human` 后缀）。
+16. **已修复的历史口径 bug**：家具材质比例曾反转（79% metal，文档口径 80% wood）；
+    折线轨迹顶点曾恒 3（现为 3-4 顶点 = 2-3 段）。**旧代码生成的场景几何/CSI 与现版
+    不可比，需重生成。**
+17. **human-frac 按 scene id 分带**：判据 `(seed % 1000) < frac*1000` 且
+    `seed = 3407*1000003 + id` → id 0-778 全关、779-979 全开（每 1000 连号恰 20%）。
+    按 1000 一片分片时占比正确；取任意连续子集时人体占比可能是 0% 或 100%。
+18. **房间尺寸（2026-11-28 用户决策）**：`room_size_range_m = (7.0, 15.0)`——w,d 逐场景
+    独立 U(7,15)m、h 固定 3m（yaml 置 null 可回固定 10×10 模式）。
+
+数据集纪律（沿用旧 §8，仍有效）：
+19. **PNG 是数据集资产、张量是派生**——不要把张量当数据集 floorplan（rooms10 布局中
+    floorplan 仅 QC 可选）。
+20. **Radio Map 仅可视化**（用户约定），不要写进数据集或喂模型。
+21. **划分纪律**：同一场景的样本永不跨 train/test（合成数据重演 D53"相邻样本跨 split"
+    教训没有借口）。
+
+### PC.6 交付回传
+
+生成 + QC 全部通过后，回传训练机：
+
+```bash
+# ① 必交付：dataset 层（消费层入口）+ rt_timing.csv
+tar czf sionna_dataset.tar.gz -C sionna_dataset dataset rt_timing.csv
+# ② 建议一并交付：scenes/（几何源——训练侧"干净几何 vs 传感几何"消融要用）
+tar czf sionna_scenes.tar.gz -C sionna_dataset scenes
+# ③ 校验：文件数与字节数清单
+find sionna_dataset/dataset -name '*.npz' | wc -l    # 期望 = 场景数 × 4（env_pc+sidecar+csi×2 口径）
+find sionna_dataset/dataset -name 'link_summary.csv' | wc -l   # 期望 = 场景数
+du -sh sionna_dataset/*
+```
+
+训练机消费方式：`pc_csi_pretrain.py --sionna-root <解压路径>/dataset`（与 rooms10 数据
+混合或单独训练均可；消费层只读 `csi.npz + link_summary.csv + sidecar_pc.npz +
+env_pc.npz`，契约见 `XRF55_HAR/csi_jepa/pc_data.py`）。
+
+**回报内容**：pilot/正式的 rt_timing.csv 均值、QC 的 bad 场景清单（应为 0）、最终场景数、
+人体场景占比（`grep -l human_blockage dataset/*/radio/run.json | wc -l`）。
 
 ---
 
-## 0. 速览（deprecated DLoc 布局速览，Phase PC 见上节）
+## 0. 速览（deprecated DLoc 布局速览，仅留档；主线见 §Phase PC）
 
 | 项 | 值 |
 |---|---|
@@ -108,16 +316,16 @@ MUSE-FM 用 Blender 人工建模 + Sionna 射追造了 2600 个室内场景 × 5
 
 | 维度 | MUSE-FM | 我们 |
 |---|---|---|
-| 频段 | 28 GHz mmWave | **2.4 GHz ISM**（WiFi 感知口径） |
-| 子载波 | 48 @1.8kHz | **234 @156.25kHz**（对齐 DLoc/Nexmon，结构可换） |
-| 天线 | BS 16×4 UPA | AP **2×2 UPA**（每 AP 8 行 CSI，与 DLoc 缓存同构） |
-| 场景 | Blender 单间 | **程序化**（无需 Blender）单间配方 + 1-2 隔墙分房 + 门洞 + 家具 |
-| 场景表示 | 100×100 scene graph | FLOORPLAN_SPEC §5b 4 通道张量（0.2m cell，更细） |
-| 划分 | 按场景 2000/300/300 | 同纪律：场景级划分（`interp` / `holdout_scenes`） |
+| 频段 | 28 GHz mmWave | **3.5 GHz**（Phase PC rooms10 口径；旧 DLoc 布局为 2.4 GHz ISM） |
+| 子载波 | 48 @1.8kHz | **256 @30kHz**（10rooms 同款主口径 + 100MHz wide 副口径） |
+| 天线 | BS 16×4 UPA | **单 TX-SISO**（TX 高 2.12m，UE 高 1.25m） |
+| 场景 | Blender 单间 | **程序化**（无需 Blender）：外壳 w,d∈U(7,15)m/h=3m + 1-2 面贯通带门洞隔墙 + 0-3 隔墙 + 0-2 圆柱 + 0-4 家具 |
+| UE | 每场景 50 静态点 | **480 快照轨迹 @60Hz**（直线/折线/平滑随机游走） |
+| 划分 | 按场景 2000/300/300 | 同纪律：场景级划分（`interp` / `loso`） |
 
 ---
 
-## 2. 环境安装（用户执行）
+## 2. 环境安装（背景阅读；执行以 §PC.1 的自检序列为准）
 
 ```bash
 conda create -n sionna python=3.11 -y
@@ -199,9 +407,9 @@ Scattering / RCS。跑教程需要 jupyter：`conda run -n sionna pip install ju
 
 ---
 
-## 4. 我们的管线
+## 4. 我们的管线（deprecated DLoc 布局，留档；rooms10 主线见 §Phase PC）
 
-### 4.1 目录与数据流
+### 4.1 目录与数据流（deprecated）
 
 ```
 sionna_gen/                     生成管线（sionna env 运行）
@@ -233,7 +441,7 @@ PNG 派生）+ CSI（rt_runner，几何→GPU 射追）→ 训练（csi_jepa 读
 注意张量与 CSI 的几何来源不同（PNG vs scene.xml）但同源同坐标约定；renderer↔tensors
 之间有**精确可逆**的采样映射（8/5 整数运算），零失配（sanity_check 可验证）。
 
-### 4.2 命令
+### 4.2 命令（deprecated）
 
 ```bash
 cd /home/ubuntu/users/wr/dev/X-Fi          # 仓库根（产物生成在 ./sionna_dataset）
@@ -253,7 +461,7 @@ conda run -n sionna python -m sionna_gen.build_cache --start 100 --num-scenes 25
 断点续跑：各阶段产物已存在即 skip；`--overwrite` 强制重做；`--stages scenes floorplans`
 可只跑 CPU 阶段。多 GPU：按 `--start/--num-scenes` 分片起多个进程（每卡一个）。
 
-### 4.3 场景配方的随机化明细
+### 4.3 场景配方的随机化明细（deprecated DLoc 布局）
 
 | 元素 | 数量 | 随机量 |
 |---|---|---|
@@ -268,7 +476,7 @@ conda run -n sionna python -m sionna_gen.build_cache --start 100 --num-scenes 25
 
 放置纪律：追加物"先验 footprint、后提交"（被拒候选不留孤儿 mesh）；40 次放不下则少一件。
 
-### 4.4 floorplan（数据集资产）规范
+### 4.4 floorplan（数据集资产）规范（deprecated；rooms10 中仅 QC 可选）
 
 逐条执行 `floorplan_dataset/FLOORPLAN_SPEC.md`：SCALE 16px/m、画布 1024×464（64×29m 全局，
 与 DLoc 同框）、内容左下角锚定 MARGIN=1m、语义调色板（free #ffffff / occ #1a1a1a /
@@ -281,7 +489,7 @@ ch2 SDF（native EDT、tanh(sdf/1m) mean-pool）/ ch3 unknown（画布补白 + >
 ch4 AP 高斯（σ=0.5m，训练侧加载时按坐标现算）。数学与 `csi_jepa/floorplan.py` 的
 DLocRasterBuilder 同款，张量形状 (160,320) 与 DLoc 完全一致 → SceneEncoder 可直接换语料。
 
-### 4.5 缓存格式（与 dloc_cache 逐位同构）
+### 4.5 缓存格式（与 dloc_cache 逐位同构，deprecated）
 
 | 项 | 值 |
 |---|---|
@@ -297,18 +505,24 @@ DLocRasterBuilder 同款，张量形状 (160,320) 与 DLoc 完全一致 → Scen
 - **默认就是 GPU**：Mitsuba/Dr.Jit 把路径生成、场计算、cfr 编译成 CUDA kernel；
   CPU 只承担场景文件生成、PNG 光栅化和落盘。
 - 验证：脚本打印 `mitsuba variant`，`cuda_ad_mono_polarized` = GPU 生效。
-- 并行：单场景内 50 UE×4 AP 已批处理；场景间按 GPU 分片（`--start/--num-scenes`）近线性加速。
+- 并行：单场景内多 UE/快照已批处理（rooms10：solveA 分块批 + 人体逐快照）；场景间按
+  GPU 分片（`--start/--num-scenes`）近线性加速。
 - 路径数上不去/太慢的旋钮：`samples_per_src`（默认 1e6）、`max_depth`（默认 3）、
-  `diffraction`（默认关——开一阶绕射耗时 ×3-10，留作对照实验）。
+  `diffraction`（默认关——开一阶绕射耗时 ×3-10，留作对照实验）、`rt_rx_chunk`
+  （solveA 分块，显存吃紧调小）。
 
-## 6. 存储预算
+---
+
+## 6. 存储预算（deprecated DLoc 估算；rooms10 实测见 §PC.4）
 
 每样本 32×234×4B ≈ 75KB；50 样本/场景 ≈ 3.75MB；**2600 场景 ≈ 10GB CSI**，
 张量 ~0.6MB/场景（compressed ≈1.6GB 总），场景 XML+PLY ~1MB/场景。pilot 100 场景 <0.5GB。
-磁盘紧张时把 `sionna_dataset` 放 /mnt/DataDrive164 并软链回仓库根（不 move 原始数据的
-约定不变，这是新产物）。
+磁盘紧张时把 `sionna_dataset` 放大容量盘并软链回仓库根（不 move 原始数据的约定不变，
+这是新产物）。
 
-## 7. 时间估算（单卡 RTX 4090 级；以 rt_timing.csv 实测为准）
+---
+
+## 7. 时间估算（deprecated DLoc 布局估算；rooms10 实测见 §PC.4）
 
 | 阶段 | 设备 | 单场景 | pilot 100 | full 2600 |
 |---|---|---|---|---|
@@ -322,7 +536,7 @@ sanity_check 会打印单场景实测并外推 pilot 耗时——把实测值回
 
 ---
 
-## 8. 常见坑（核对清单）
+## 8. 常见坑（DLoc 时期清单，留档；主线陷阱以 §PC.5 为准）
 
 1. **确定性**：PathSolver 默认非确定（固定 seed 也不保）；批量生成必须 `deterministic=True`。
 2. **单位与轴向**：米；Z 向上；PNG/张量 **行 0 = y_max**（DLoc 掩码同约定）。
@@ -338,9 +552,13 @@ sanity_check 会打印单场景实测并外推 pilot 耗时——把实测值回
 
 ---
 
-## 9. 训练侧接入（xfi env）
+## 9. 训练侧接入（deprecated DLoc 接入方式，留档）
 
-`csi_jepa/sionna_data.py` 已提供与 DLoc 接口对齐的 `SionnaCorpus`（动态场景数；
+> Phase PC 主线的训练侧消费 = `csi_jepa/pc_data.py`（PCSceneCorpus/PCDataset，
+> rooms10 与 sionna 两库同构目录一套代码；CSI 统一 (T,2,256) re/im；
+> interp/loso 划分），见 PROJECT_LOG §12.3。
+
+`csi_jepa/sionna_data.py` 提供与 DLoc 接口对齐的 `SionnaCorpus`（动态场景数；
 `interp` / `holdout_scenes` 划分）与 `SionnaRasterProvider`（PNG 派生张量惰性加载 +
 AP 高斯现算，接口同 `DLocRasterBuilder`）；Dataset/collate 直接复用 dloc_data（缓存同构）。
 
@@ -385,16 +603,22 @@ raster vs none 的零样本差距 = "几何先验在多场景下是否可迁移"
 
 ## 10. 决策点与待办
 
-- [ ] 用户：建 env `sionna` + 实装 `sionna-rt==2.2.0`（先 `--dry-run` 看依赖解析）
-- [ ] sanity_check 通过（斜率≈−2、量级与 DLoc 同数量级、PNG 目检）
-- [ ] pilot 100 场景 → xfi 下游冒烟 → 扩量决策（2600 场景，多 GPU 分片可选）
-- [ ] 训练脚本接入 diff 应用（合并本分支后在 floorplan 工作副本执行）
-- [ ] 实测耗时回填 §7；PROJECT_LOG §12 誊录（本文件 §11 为草稿）
+- [x] 用户：建 env `sionna` + 实装 `sionna-rt==2.2.0`（生成机 4090×2，2026-11-28 就绪）
+- [x] sanity_check 通过（pilot v4：4/4 场景全 PASS，NMSE/轨迹/标签全绿）
+- [x] pilot 100 场景（2026-11-28 完成，双卡 17 min，全套 QC 通过，实测回填 §PC.4）
+- [ ] 批量 1000–5000 场景启动（规模与参数待用户确认；实测 1000 ≈3h、5000 ≈15h 双卡）
+- [ ] Phase PC bugfix/口径变更提交 git 固化（rt_runner/config/scene_generator/
+      trajectory/sanity_check + 本文档）
+- [ ] PROJECT_LOG §12 誊录（生成机实测 + bug 修复清单 + pilot 记录）
+- [ ] floorplan QC PNG 补渲染（可选，单进程 `--stages floorplans`）
+- [ ] 训练机侧：pilot 数据回传后 pc_csi_pretrain 冒烟（§PC.6 消费方式）
 
-## 11. 运行记录（待誊入 PROJECT_LOG.md §12）
+## 11. 运行记录
 
 | 日期 | 事项 | 结果 |
 |---|---|---|
 | 2026-11-13 | plan 批准：Sionna 合成数据集（MUSE-FM 方法复现 + WiFi 化）；用户决策：独立 env `sionna`、floorplan 只能是 PNG、Radio Map 仅可视化、维护本文档 | sionna_gen/ 管线 + 训练侧 sionna_data.py + 本文档落地 |
-| （待填） | sanity_check scene_0 | （斜率/量级/耗时） |
-| （待填） | pilot 100 场景 | （实测均值、下游 fp_scratch 冒烟） |
+| 2026-11-27 | Phase PC 转向 rooms10 对齐（PROJECT_LOG §12）；训练机 V100 无兼容 GPU，CPU llvm 冒烟 5s/场景全链路通过 | 布局切换 + 轨迹/人体/点云/双带宽落地 |
+| 2026-11-28 | 生成机（4090×2）pilot 执行：修复 6 个 bug——①solveA 480RX 全批量 OOM→`rt_rx_chunk=64` 分块（bitwise 等价验证）②人体 solve 闭包误用无人体场景（blocked 恒 0）③家具材质 wood/metal 比例反转（79% metal→80% wood）④人体内联 bsdf 与 wood 家具重名 duplicate ID 崩溃 ⑤折线顶点恒 3（→3-4）⑥几何相交 `_seg_poly_t` 裁剪上下界写反；LOS 改几何判定（旧 min-tau 2ns 法 37% 误标穿墙/掠射反射）| pilot v4 100 场景 17min，全套 QC 绿（0 坏场景、独立对拍 0 不一致、tau 交叉 100% 吻合、4×sanity PASS），实测回填 §PC.4 |
+| 2026-11-28 | 房间尺寸多样性（用户决策）：w,d 逐场景 U(7,15)m、h=3m 固定；500 场景元数据审计（尺寸均匀、小房间轨迹不退化）| 旧 10×10 固定尺寸产物清除重生成 |
+| 2026-11-28 | SIONNA_HANDOFF.md 并入本文档（§Phase PC）后删除；此后唯一维护本文档 | — |

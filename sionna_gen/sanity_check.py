@@ -235,17 +235,21 @@ def sanity_rooms10(args, cfg, dirs):
     check('NMSE ≈ -SNR', bool(np.all(np.abs(nmse - target) < 1.0)),
           f'nmse {nmse.round(2).tolist()} vs target {target.tolist()}')
 
-    # 4) 自由空间斜率（LOS 快照：sum_path_gain（线性） vs 距离 log-log ≈ -2）
+    # 4) 自由空间斜率（几何 LOS 快照：sum_path_gain（线性） vs 距离 log-log ≈ -2。
+    #    轨迹模式下 LOS 距离跨度常不足（<2x）——跨度不够时斜率估计方差巨大，跳过不判）
     dd = np.array([float(r['distance_over_c_ns']) * 0.299792458 for r in link])
     gain_db = np.array([float(r['sum_path_gain_db']) for r in link])
     is_los = np.array([r['los'] == '1' for r in link])
-    if is_los.sum() >= 20:                                   # 冒烟规模(少快照/少样本)无统计意义
+    dd_los = dd[is_los]
+    if is_los.sum() >= 30 and dd_los.max() / max(dd_los.min(), 0.5) >= 2.0:
         pw = 10.0 ** (gain_db[is_los] / 10.0)
-        s, _ = np.polyfit(np.log(dd[is_los]), np.log(pw), 1)
+        s, _ = np.polyfit(np.log(dd_los), np.log(pw), 1)
         check('自由空间斜率 ≈ -2', abs(s + 2.0) < 0.35,
-              f'slope {s:.2f} @ {int(is_los.sum())} LOS 快照')
+              f'slope {s:.2f} @ {int(is_los.sum())} LOS 快照, '
+              f'd ∈ [{dd_los.min():.1f}, {dd_los.max():.1f}]m')
     else:
-        print(f'  [info] LOS 快照仅 {int(is_los.sum())} 个，跳过斜率拟合')
+        print(f'  [info] 跳过斜率拟合：LOS 快照 {int(is_los.sum())} 个 / 距离跨度不足'
+              f'（轨迹模式常见，无统计意义）')
 
     # 5) LOS / 人体遮挡统计
     n_los = sum(r['los'] == '1' for r in link)
@@ -254,9 +258,12 @@ def sanity_rooms10(args, cfg, dirs):
     frac_blk = n_blk / T
     print(f'  LOS 快照 {n_los}/{T}（{frac_los:.0%}）；'
           f'人体遮挡 LOS {n_blk}（{frac_blk:.0%}）')
-    if cfg.human_occluder and frac_blk == 0.0:
-        fails.append('human-blockage 无剪枝（顶点缺失或几何未命中——检查 run.json 的 '
-                     'path_vertices_used_for_pruning）')
+    if cfg.human_occluder and frac_blk == 0.0 and frac_los >= 0.2:
+        fails.append('human-blockage 全 0 而 LOS 快照充足——人体圆柱与视线永不相交，'
+                     '检查 human_cylinders/seg_hits_human 与 human_offset')
+    elif cfg.human_occluder and frac_blk == 0.0:
+        print(f'  [info] 人体未遮挡任何视线（该场景几何 LOS 仅 {frac_los:.0%}，'
+              f'0 阻挡合法）')
 
     # 7) 轨迹自由空间复检（抽 50 点）
     boxes = blocker_boxes(meta, cfg.traj_clearance_m)

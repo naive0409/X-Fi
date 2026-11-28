@@ -75,6 +75,10 @@ class GenConfig:
     human_height_m: float = 1.78
     human_material: str = 'wood'    # 人体近似材质（理想吸收体以后处理路径剪枝实现）
     human_profile: tuple = HUMAN_PROFILE
+    human_sight_core_frac: float = 0.5  # 人体视线遮挡判据：躯干核心半径 = 该倍数 ×
+                                        # min(横向,前后)半径（"躯干轴心穿越"才算遮挡，
+                                        # 见 rt_runner._human_blocks_sight——UE 本体在
+                                        # 人体轮廓内，端点触及不能作判据）
     snr_tiers_db: tuple = (0, 10, 20, 30)   # estimated_csi 的 4 档 SNR（10rooms 同款）
     # ---- 环境点云（替代 Isaac lidar：mesh 表面采样；每场景一张静态图）
     pc_full_points: int = 40960     # 全分辨率表面采样点数
@@ -82,17 +86,22 @@ class GenConfig:
     # ---- 射追（PathSolver；主线不开绕射——开销 3-10 倍，留开关做对照）
     max_depth: int = 3
     samples_per_src: int = 1_000_000
+    rt_rx_chunk: int = 64           # solveA 的 Receiver 分块（显存 ∝ 块大小×samples_per_src，
+                                    # 480 全批量 @1e6 会 OOM；deterministic+seed 下分块
+                                    # 不改变逐 RX 结果，仅控显存）
     los: bool = True
     specular_reflection: bool = True
     diffuse_reflection: bool = False
     refraction: bool = True         # 穿墙（thin-wall 模型）
     diffraction: bool = False
     synthetic_array: bool = True
-    # ---- 场景配方（MUSE-FM：10x10x3m、地板 concrete、外围墙 brick、0-3 隔墙 +
-    #      0-2 圆柱全 marble；扩展：1-2 面分房隔墙（带门洞）+ 0-4 件家具 wood/metal）
-    room_w_m: float = 10.0
+    # ---- 场景配方（地板 concrete、外围墙 brick、0-3 隔墙 + 0-2 圆柱全 marble；
+    #      扩展：1-2 面分房隔墙（贯通房间、带 1-2 门洞）+ 0-4 件家具 wood/metal。
+    #      房间尺寸（用户决策 2026-11-28）：w,d 逐场景独立 U(7,15)m、h 固定 3m）
+    room_w_m: float = 10.0         # 固定尺寸模式（room_size_range_m=None 时生效）
     room_d_m: float = 10.0
     room_h_m: float = 3.0
+    room_size_range_m: tuple = (7.0, 15.0)  # 逐场景 [w,d] 均匀采样范围；None = 固定尺寸
     wall_thickness_m: float = 0.1   # RT 几何实际厚度（thin-box，材质 thickness 同值）
     n_divider_min: int = 1          # 分房隔墙（轴对齐、开门洞）
     n_divider_max: int = 2

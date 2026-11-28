@@ -5,8 +5,8 @@ layout='rooms10'（Phase PC 主线，对齐 dataset_10rooms）：
   scenes     scene_generator：scene_<id>/{scene.xml, meshes/, metadata.json(含轨迹)}
   floorplans floorplan_renderer：QC 可选（PNG 不入数据集消费路径）
   env_pc     pointcloud_exporter：dataset/scene_<id>/env_pc.npz（mesh 表面采样）
-  rt         rt_runner.rooms10：dataset/scene_<id>/radio/{cir,csi,csi_<other>,link_summary,run.json}
-             + sidecar_pc.npz（单 TX-SISO × 轨迹快照；人体=求解后几何剪枝）
+  rt         rt_runner.rooms10：dataset/scene_<id>/radio/{csi,csi_<other>,link_summary,run.json}
+             + sidecar_pc.npz（单 TX-SISO × 轨迹快照；人体=逐快照 in-scene solve）
 layout='dloc'（deprecated）：原四阶段不变（scenes/floorplans/tensors/rt）。
 
 用法（conda run -n sionna，GPU 任务跑前先 nvidia-smi）：

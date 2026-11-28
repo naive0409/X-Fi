@@ -84,7 +84,7 @@ def _candidate_waypoints(rng, kind, boxes, w, d, total_len):
                 return [a, b]
         return None
 
-    n_wp = int(rng.randint(3, 4))            # 折线 2-3 段
+    n_wp = int(rng.randint(3, 5))            # 折线 2-3 段（3-4 个顶点）
     pts = []
     remaining = total_len
     for i in range(n_wp):

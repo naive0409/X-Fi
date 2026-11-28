@@ -122,7 +122,13 @@ def _split_wall_with_doors(rng, length, door_w, margin=0.5):
 def generate_scene(scene_id, cfg, out_dirs_map):
     """生成单场景：写 scene.xml + meshes/*.ply + metadata.json。返回 metadata dict。"""
     rng = np.random.RandomState(scene_seed(cfg, scene_id))
-    w, d, h = cfg.room_w_m, cfg.room_d_m, cfg.room_h_m
+    h = cfg.room_h_m
+    if getattr(cfg, 'room_size_range_m', None) is not None:
+        lo, hi = cfg.room_size_range_m          # 用户决策 2026-11-28：w/d 逐场景 U(7,15)m
+        w = float(rng.uniform(lo, hi))
+        d = float(rng.uniform(lo, hi))
+    else:
+        w, d = cfg.room_w_m, cfg.room_d_m
     t = cfg.wall_thickness_m
     scene_dir = os.path.join(out_dirs_map['scenes'], f'scene_{scene_id}')
     mesh_dir = os.path.join(scene_dir, 'meshes')
@@ -227,7 +233,7 @@ def generate_scene(scene_id, cfg, out_dirs_map):
         sy = float(rng.uniform(0.4, 2.0))
         fz = float(rng.uniform(0.5, 0.9))
         yaw = float(rng.choice([0.0, np.pi / 2]))
-        mat = MATS_FURNITURE[int(rng.rand() < 0.8)]     # 偏 wood
+        mat = MATS_FURNITURE[int(rng.rand() > 0.8)]     # 偏 wood（80% wood / 20% metal）
         try_place(lambda x, y: box_corners_2d(x, y, sx, sy, yaw),
                   lambda x, y: add_box('furniture', mat, x, y, fz / 2, sx, sy, fz, yaw),
                   0.3)

@@ -196,38 +196,42 @@ def trace_scene_rooms10(scene_dir, dataset_dir, cfg, overwrite=False,
     df_other = BANDWIDTH_PRESETS[preset_other]
     freqs = _band_freqs(cfg.n_subcarriers, df_main, cfg.fc_hz)
 
-    scene = load_scene(os.path.join(scene_dir, 'scene.xml'), merge_shapes=True)
-    scene.frequency = cfg.fc_hz
-    scene.tx_array = PlanarArray(num_rows=cfg.tx_rows, num_cols=cfg.tx_cols,
-                                 vertical_spacing=cfg.tx_spacing_wl,
-                                 horizontal_spacing=cfg.tx_spacing_wl,
-                                 pattern=cfg.tx_pattern, polarization=cfg.tx_polarization)
-    scene.rx_array = PlanarArray(num_rows=cfg.rx_rows, num_cols=cfg.rx_cols,
-                                 vertical_spacing=cfg.rx_spacing_wl,
-                                 horizontal_spacing=cfg.rx_spacing_wl,
-                                 pattern=cfg.rx_pattern, polarization=cfg.rx_polarization)
     ap = meta['aps'][0]                                   # rooms10：恒单 TX
-    scene.add(Transmitter(name='tx', position=mi.Point3f(float(ap['x']), float(ap['y']),
-                                                         float(ap['z'])),
-                          orientation=mi.Point3f(0.0, 0.0, 0.0)))
     traj = meta['trajectory']
     ue_xyz = np.asarray(traj['positions'], dtype=np.float64)          # (T, 3)
     capture_t = np.asarray(traj['capture_time_s'], dtype=np.float64)
     yaw_t = np.asarray(traj['heading_yaw_rad'], dtype=np.float64)
     tx_xyz = np.array([ap['x'], ap['y'], ap['z']])
     T = len(ue_xyz)
-    for i in range(T):
-        scene.add(Receiver(name=f'ue{i}',
-                           position=mi.Point3f(float(ue_xyz[i, 0]), float(ue_xyz[i, 1]),
-                                               float(ue_xyz[i, 2])),
-                           orientation=mi.Point3f(0.0, 0.0, 0.0)))
 
     seed = scene_seed(cfg, meta['scene_id'])
     solver = PathSolver(deterministic=True)
     t0 = time.perf_counter()
 
-    def _solve(batched_rx):
-        paths = solver(scene, max_depth=cfg.max_depth,
+    def _new_scene(xml_path, rx_xyz):
+        "加载场景 + 天线/单 TX + rx_xyz 逐行 Receiver（solveA 分块与人体逐快照共用）。"
+        sc = load_scene(xml_path, merge_shapes=True)
+        sc.frequency = cfg.fc_hz
+        sc.tx_array = PlanarArray(num_rows=cfg.tx_rows, num_cols=cfg.tx_cols,
+                                  vertical_spacing=cfg.tx_spacing_wl,
+                                  horizontal_spacing=cfg.tx_spacing_wl,
+                                  pattern=cfg.tx_pattern, polarization=cfg.tx_polarization)
+        sc.rx_array = PlanarArray(num_rows=cfg.rx_rows, num_cols=cfg.rx_cols,
+                                  vertical_spacing=cfg.rx_spacing_wl,
+                                  horizontal_spacing=cfg.rx_spacing_wl,
+                                  pattern=cfg.rx_pattern, polarization=cfg.rx_polarization)
+        sc.add(Transmitter(name='tx', position=mi.Point3f(float(ap['x']), float(ap['y']),
+                                                          float(ap['z'])),
+                           orientation=mi.Point3f(0.0, 0.0, 0.0)))
+        for i in range(len(rx_xyz)):
+            sc.add(Receiver(name=f'ue{i}',
+                            position=mi.Point3f(float(rx_xyz[i, 0]), float(rx_xyz[i, 1]),
+                                                float(rx_xyz[i, 2])),
+                            orientation=mi.Point3f(0.0, 0.0, 0.0)))
+        return sc
+
+    def _solve(sc, n_rx):
+        paths = solver(sc, max_depth=cfg.max_depth,
                        samples_per_src=cfg.samples_per_src,
                        synthetic_array=cfg.synthetic_array, los=cfg.los,
                        specular_reflection=cfg.specular_reflection,
@@ -238,7 +242,7 @@ def trace_scene_rooms10(scene_dir, dataset_dir, cfg, overwrite=False,
         a = np.asarray(a)
         if a.ndim == 6:                                        # [rx,ant,tx,ant,P,1]
             a = a[..., 0]
-        return a.reshape(len(batched_rx), -1), np.asarray(tau).reshape(len(batched_rx), -1)
+        return a.reshape(n_rx, -1), np.asarray(tau).reshape(n_rx, -1)
 
     def _truncate(coef, tau):
         "能量序截断/补零到 N_PATH_SLOTS（|coef| 降序，无效 tau=0 排尾）。"
@@ -258,11 +262,32 @@ def trace_scene_rooms10(scene_dir, dataset_dir, cfg, overwrite=False,
             v = np.concatenate([v, np.zeros((len(v), pad), dtype=v.dtype)], axis=1)
         return coef, tau, v
 
-    # ---- solve A：无人体，T 个快照位置全作为 Receiver（一次 batched solve）
-    coef, tau, valid = _truncate(*_solve(ue_xyz))
+    # ---- solve A：无人体；T 个快照位置分块 batched solve。候选路径张量显存
+    #      ∝ rx数 × samples_per_src（480 全批量 @1e6 远超 24GB 卡——实测 jit_malloc
+    #      8GiB 单块失败），按 rt_rx_chunk 分块；deterministic+seed 的候选射线只由
+    #      src 决定、与目标分批无关——分块不改变逐 RX 结果（有冒烟 bitwise 校验）。
+    scene_xml_path = os.path.join(scene_dir, 'scene.xml')
+    rx_chunk = max(1, int(getattr(cfg, 'rt_rx_chunk', 64)))
+    coef_c, tau_c, valid_c = [], [], []
+    for s0 in range(0, T, rx_chunk):
+        sl = ue_xyz[s0:s0 + rx_chunk]
+        c, t_ = _solve(_new_scene(scene_xml_path, sl), len(sl))
+        c, t_, v = _truncate(c, t_)        # 逐 chunk 截断到 N_PATH_SLOTS（逐行独立操作，
+        coef_c.append(c)                   # 与全批量截断逐位等价；且对齐各 chunk 的 P 维）
+        tau_c.append(t_)
+        valid_c.append(v)
+    coef = np.concatenate(coef_c, axis=0)
+    tau = np.concatenate(tau_c, axis=0)
+    valid = np.concatenate(valid_c, axis=0)
     P = N_PATH_SLOTS
     d_3d = np.linalg.norm(ue_xyz - tx_xyz[None, :], axis=1)
-    los_without_human = _los_flags(tau, valid, d_3d)
+    # ---- LOS 判定（2026-11-28 重定义：几何视线，替代旧 min-tau≈d/c 2ns 容差——后者会把
+    #      穿墙折射路径误标为 LOS（墙附加时延 ~0.4ns < 2ns；pilot 实测 37% 标称 LOS 被墙挡）。
+    #      视线 z ∈ [ue_z, tx_z]：家具(≤0.9m)/门楣(≥2.1m)的 z 区间天然不重叠，只有贯通全高
+    #      的 divider/partition/cylinder 参与；人体遮挡用 human_cylinders 圆柱精确相交）
+    tx3 = (float(tx_xyz[0]), float(tx_xyz[1]), float(tx_xyz[2]))
+    los_without_human = np.array([not _sight_blocked(tx3, tuple(ue), meta['items'])
+                                  for ue in ue_xyz])
     t_A = time.perf_counter()
 
     # ---- 人体遮挡（用户决策保留 + config 开关；mode = 逐快照 in-scene solve，
@@ -285,12 +310,11 @@ def trace_scene_rooms10(scene_dir, dataset_dir, cfg, overwrite=False,
             '\t\t<string name="filename" value="{ply}"/>\n'
             '\t\t<boolean name="face_normals" value="true"/>\n'
             '\t\t<transform name="to_world"><matrix value="{mat}"/></transform>\n'
-            '\t\t<bsdf type="itu-radio-material" id="mat-itu_{mat_name}">\n'
+            '\t\t<bsdf type="itu-radio-material" id="mat-itu_{mat_name}_human">\n'
             '\t\t\t<string name="type" value="{mat_name}"/>\n'
             '\t\t\t<float name="thickness" value="0.1"/>\n'
             '\t\t</bsdf>\n'
             '\t</shape>\n')
-        los = np.zeros(T, dtype=bool)
         coef_h = np.zeros_like(coef)
         tau_h = np.zeros_like(tau)
         valid_h = np.zeros_like(valid)
@@ -306,32 +330,20 @@ def trace_scene_rooms10(scene_dir, dataset_dir, cfg, overwrite=False,
             xml_path = os.path.join(scene_dir, f'_scene_snap{i}.xml')
             with open(xml_path, 'w') as f:
                 f.write(xml_i)
-            sc_i = load_scene(xml_path, merge_shapes=True)
-            sc_i.frequency = cfg.fc_hz
-            sc_i.tx_array = PlanarArray(num_rows=cfg.tx_rows, num_cols=cfg.tx_cols,
-                                        vertical_spacing=cfg.tx_spacing_wl,
-                                        horizontal_spacing=cfg.tx_spacing_wl,
-                                        pattern=cfg.tx_pattern,
-                                        polarization=cfg.tx_polarization)
-            sc_i.rx_array = PlanarArray(num_rows=cfg.rx_rows, num_cols=cfg.rx_cols,
-                                        vertical_spacing=cfg.rx_spacing_wl,
-                                        horizontal_spacing=cfg.rx_spacing_wl,
-                                        pattern=cfg.rx_pattern,
-                                        polarization=cfg.rx_polarization)
-            sc_i.add(Transmitter(name='tx',
-                                 position=mi.Point3f(float(ap['x']), float(ap['y']),
-                                                     float(ap['z'])),
-                                 orientation=mi.Point3f(0.0, 0.0, 0.0)))
-            sc_i.add(Receiver(name='ue0',
-                              position=mi.Point3f(float(ue_xyz[i, 0]),
-                                                  float(ue_xyz[i, 1]),
-                                                  float(ue_xyz[i, 2])),
-                              orientation=mi.Point3f(0.0, 0.0, 0.0)))
-            c_i, t_i = _solve(ue_xyz[i:i + 1])
+            sc_i = _new_scene(xml_path, ue_xyz[i:i + 1])
+            c_i, t_i = _solve(sc_i, 1)
             coef_h[i:i + 1], tau_h[i:i + 1], valid_h[i:i + 1] = _truncate(c_i, t_i)
             os.remove(xml_path)
         coef, tau, valid = coef_h, tau_h, valid_h
-        los = _los_flags(tau, valid, d_3d)
+        los = los_without_human.copy()
+        for i in range(T):
+            if not los[i]:
+                continue
+            if _human_blocks_sight(tx3, tuple(ue_xyz[i]),
+                                   (float(human_rows[i, 0]), float(human_rows[i, 1])),
+                                   float(yaw_t[i]), cfg.human_profile,
+                                   float(getattr(cfg, 'human_sight_core_frac', 0.5))):
+                los[i] = False
         blocked = los_without_human & ~los
         human_xml = 'per-snapshot in-scene solve'
     prune_s = time.perf_counter() - t_A
@@ -479,13 +491,87 @@ def trace_scene_rooms10(scene_dir, dataset_dir, cfg, overwrite=False,
     return timing
 
 
-def _los_flags(tau, valid, d_3d):
-    "LOS 判定：存在 tau ≈ d/c（2ns 容差）的有效路径。"
-    los = np.zeros(tau.shape[0], dtype=bool)
-    for i in range(tau.shape[0]):
-        cand = valid[i] & (np.abs(tau[i] - d_3d[i] / C_M_S) < 2e-9)
-        los[i] = bool(cand.any())
-    return los
+def _seg_poly_t(p0, p1, poly):
+    """2D 线段 [p0,p1] 与凸多边形（footprint，顶点绕序一致）的重叠参数区间 (t0, t1)。
+
+    逐边做半平面裁剪（法向统一指向多边形内部，以质心定向，不依赖绕序方向）；
+    线段整体在多边形内返回 (0,1)。无交返回 None。"""
+    poly = np.asarray(poly, dtype=np.float64)
+    c = poly.mean(axis=0)
+    p0 = np.asarray(p0, dtype=np.float64)[:2]
+    p1 = np.asarray(p1, dtype=np.float64)[:2]
+    d = p1 - p0
+    t0, t1 = 0.0, 1.0
+    for i in range(len(poly)):
+        a, b = poly[i], poly[(i + 1) % len(poly)]
+        nrm = np.array([b[1] - a[1], a[0] - b[0]])       # 边的任一侧法向
+        if float(nrm @ (c - a)) < 0.0:                    # 统一指向内部
+            nrm = -nrm
+        nd = float(nrm @ d)
+        nf = float(nrm @ (p0 - a))
+        if abs(nd) < 1e-12:
+            if nf < 0.0:
+                return None
+            continue
+        t = -nf / nd
+        if nd > 0.0:                                      # f(t)=nf+t·nd 单调增：约束下界
+            t0 = max(t0, t)
+        else:                                             # 单调减：约束上界
+            t1 = min(t1, t)
+        if t0 > t1:
+            return None
+    return t0, t1
+
+
+def _sight_blocked(tx3, ue3, items):
+    """TX->UE 视线是否被场景静态障碍遮挡（精确 2D 线段-凸多边形相交 + z 区间重叠）。
+
+    视线 z 从 tx3[2]（2.12m）降到 ue3[2]（1.25m）：家具（≤0.9m）与门楣（≥2.1m）的
+    z 区间天然与视线不重叠，只有贯通全高的 divider/partition/cylinder 参与。"""
+    for it in items:
+        zr = it.get('z_range')
+        if zr is None or zr[0] >= max(tx3[2], ue3[2]) or zr[1] <= min(tx3[2], ue3[2]):
+            continue                                      # z 区间与视线不相交
+        tt = _seg_poly_t(tx3, ue3, it['footprint'])
+        if tt is None:
+            continue
+        z0 = tx3[2] + (ue3[2] - tx3[2]) * tt[0]
+        z1 = tx3[2] + (ue3[2] - tx3[2]) * tt[1]
+        if min(z0, z1) <= zr[1] and max(z0, z1) >= zr[0]:
+            return True
+    return False
+
+
+def _human_blocks_sight(tx3, ue3, hc_xy, yaw, profile, core_frac=0.5):
+    """人体躯干是否实质性遮挡 TX->UE 视线（"躯干轴心穿越"判据）。
+
+    10rooms 口径下 UE 本体在人体轮廓内（旁偏 0.14m < 肩宽半径 ~0.21m），"线段触及
+    人体"会误判所有视线——以视线段到人体轴心 (hc_xy) 的 2D 最近距离是否穿过躯干
+    核心区分：从设备外侧贴身到达（距轴 ~0.14m，未穿透）不算遮挡；穿透躯干主体
+    （距轴 ≲ 前后深度/2）才算（吸收体语义下直射径被身体吃掉）。核心半径取各段
+    min(横向, 前后) 半径的 core_frac 倍；z 上要求视线与该轮廓带高度重叠。"""
+    p0 = np.asarray(tx3[:2], dtype=np.float64)
+    p1 = np.asarray(ue3[:2], dtype=np.float64)
+    d = p1 - p0
+    L2 = float(d @ d)
+    z_lo_sight, z_hi_sight = min(tx3[2], ue3[2]), max(tx3[2], ue3[2])
+    c = np.asarray(hc_xy, dtype=np.float64)
+    for k in range(len(profile) - 1):
+        z_lo, lat0, dep0 = profile[k]
+        z_hi = profile[k + 1][0]
+        lat1, dep1 = profile[k + 1][1], profile[k + 1][2]
+        if z_hi <= z_lo_sight or z_lo >= z_hi_sight:
+            continue                                      # 高度带与视线不重叠
+        core = core_frac * min(lat0, lat1, dep0, dep1)
+        if L2 < 1e-12:
+            dist = float(np.linalg.norm(p0 - c))
+        else:
+            f = p0 - c
+            t = float(np.clip(-(d @ f) / L2, 0.0, 1.0))
+            dist = float(np.linalg.norm(f + t * d))
+        if dist <= core:
+            return True
+    return False
 
 
 def _sionna_version():
