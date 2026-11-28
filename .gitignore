@@ -159,6 +159,7 @@ paper/
 sionna/
 sionna-rt/
 sionna_dataset/
+sionna_dataset.tar*
 
 XRF55_HAR/csi_eval_results
 XRF55_HAR/csi_jepa_checkpoints

@@ -197,7 +197,8 @@ def generate_scene(scene_id, cfg, out_dirs_map):
 
     # 追加物避让表：full-height 障碍（门楣在 2.1m 以上，不进表——不挡 UE/家具）
     blockers = [_aabb(it['footprint']) for it in items
-                if it['kind'] in ('divider', 'partition', 'cylinder', 'furniture')]
+                if it['kind'] in ('divider', 'partition', 'cylinder', 'column',
+                                  'furniture')]
 
     def try_place(footprint_fn, commit_fn, margin):
         "先验 footprint（无副作用），过界/过近即弃；通过才提交（写 mesh + 记 items）。"
@@ -221,11 +222,19 @@ def generate_scene(scene_id, cfg, out_dirs_map):
                   lambda x, y: add_box('partition', MAT_INNER, x, y, h / 2, L, t, h, yaw),
                   0.5)
 
-    # ---- 圆柱（0-2，marble，贯通全高）
-    for _ in range(int(rng.randint(0, cfg.n_cylinder_max + 1))):
-        r = float(rng.uniform(0.15, 0.35))
-        try_place(lambda x, y: box_corners_2d(x, y, 2 * r, 2 * r, 0.0),
-                  lambda x, y: add_cylinder(x, y, r), 0.5)
+    # ---- 柱子（0-2，marble，贯通全高；圆柱/方柱各半——用户决策 2026-11-28 增加方柱）
+    for _ in range(int(rng.randint(0, cfg.n_column_max + 1))):
+        if rng.rand() < 0.5:                              # 圆柱（MUSE-FM 配方）
+            r = float(rng.uniform(0.15, 0.35))
+            try_place(lambda x, y: box_corners_2d(x, y, 2 * r, 2 * r, 0.0),
+                      lambda x, y: add_cylinder(x, y, r), 0.5)
+        else:                                             # 方柱（边长独立采样，含矩形）
+            sx = float(rng.uniform(0.3, 0.8))
+            sy = float(rng.uniform(0.3, 0.8))
+            try_place(lambda x, y: box_corners_2d(x, y, sx, sy, 0.0),
+                      lambda x, y: add_box('column', MAT_INNER, x, y, h / 2,
+                                           sx, sy, h, 0.0),
+                      0.5)
 
     # ---- 家具（0-4，低矮 0.5-0.9m；UE 高 1m，视线可越过——散射/遮挡障碍）
     for _ in range(int(rng.randint(0, cfg.n_furniture_max + 1))):
@@ -260,7 +269,7 @@ def generate_scene(scene_id, cfg, out_dirs_map):
     #      dloc：静态点拒绝采样，保持原样）
     wall_boxes = [_aabb(it['footprint']) for it in items
                   if it['kind'] in ('outer_wall', 'divider', 'partition',
-                                    'cylinder', 'furniture')]
+                                    'cylinder', 'column', 'furniture')]
     wall_boxes = [(b[0] - 0.15, b[1] - 0.15, b[2] + 0.15, b[3] + 0.15) for b in wall_boxes]
     trajectory = None
     if cfg.layout == 'rooms10':

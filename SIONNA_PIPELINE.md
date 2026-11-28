@@ -7,7 +7,7 @@
 >
 > **本文档自包含**：原《SIONNA_HANDOFF.md》（生成机移交文档）已于 2026-11-28 并入下方
 > Phase PC 节并删除，此后**只维护本文档**。给 coding agent 的话：生成机上的唯一任务是
-> 搭环境 → 冒烟 → 体检 → pilot → 批量 1000–5000 场景 + 质检回传；**不要在生成机上训练
+> 搭环境 → 冒烟 → 体检 → 量产（当前 2500 场景已完成，见 §PC.0）+ 质检回传；**不要在生成机上训练
 > 任何模型**（训练在训练机的 `xfi` 环境做）；所有命令都在仓库根目录（`X-Fi/`）执行；
 > 开始前通读 §Phase PC 全节。管线代码行为/参数语义读 `sionna_gen/config.py`（GenConfig
 > 注释）；消费层契约读 `XRF55_HAR/csi_jepa/pc_data.py` 模块 docstring；项目背景与判门读
@@ -27,10 +27,14 @@ run.json）+ 新增 `env_pc.npz`（mesh 表面采样静态环境点云，替代 
 ### PC.0 状态一览（2026-11-28）
 
 - **pilot 100 场景已完成并通过全套 QC**（RTX 4090×2，17 分钟；判据与实测见 §PC.3/§PC.4）
-- 下一步：批量 1000–5000 场景（§PC.3 分片命令；实测 1000 场景 ≈3h、5000 ≈15h 双卡；
-  规模与参数待用户确认）
+- **量产规模已定：2500 场景**（用户决策 2026-11-28，不做 5000），验证并入量产前段
+  （每场景独立 + 断点安全，无需独立 pilot）——**✅ 2026-11-28 已完成并通过全套 QC**：
+  0 坏场景、tau↔几何交叉 99.95% 吻合、4×sanity PASS；人体场景 529/2500（21.2%），
+  其中有躯干遮挡 172 场景（32.5%）；耗时 8.2–8.8h（与 gcq 训练任务分时拖慢 ~8×，
+  独占卡推算 ~3h）。磁盘 dataset 22GB（8.8MB/场景）+ scenes 337MB
 - **当前生成口径**（本日多轮修复与决策后的最终形态）：房间 w,d 逐场景 U(7,15)m、h=3m；
-  家具 80% wood；LOS/人体遮挡为几何判定标签；solveA 按 `rt_rx_chunk=64` 分块。
+  分房隔墙 0-2 面均匀；柱子圆柱/方柱各半；家具 80% wood；LOS/人体遮挡为几何判定标签；
+  solveA 按 `rt_rx_chunk=64` 分块；env_pc 全局面积加权采样、默认不含房顶。
   **此前任何旧口径产物不可比，需重生成。**
 - Phase PC 代码主体在 `3D` 分支（commit ff793c3）；2026-11-28 的 bugfix/口径变更
   （rt_runner/config/scene_generator/trajectory/sanity_check）落地后待提交固化。
@@ -65,8 +69,9 @@ import 无限空转（100% CPU 不报错）——装 `libllvm17` 后消失；②
 
 ```
 python -m sionna_gen.build_cache  的四阶段（各阶段产物已存在即 skip，可断点续跑）：
-  scenes   scene_generator：程序化房间（外壳 w,d 逐场景 U(7,15)m、h=3m；1-2 面贯通带
-           门洞隔墙 + 0-3 隔墙 + 0-2 圆柱 + 0-4 家具，ITU 材质）→
+  scenes   scene_generator：程序化房间（外壳 w,d 逐场景 U(7,15)m、h=3m；0-2 面贯通带
+           门洞隔墙（1/3 场景无）+ 0-3 隔墙 + 0-2 柱子（圆柱/方柱各半）+ 0-4 家具，
+           ITU 材质）→
            scenes/scene_<id>/{scene.xml, meshes/*.ply, metadata.json（含 480 快照解析
            轨迹）, human.ply}
   floorplans QC 可选（floorplan PNG，不进消费路径）
@@ -82,11 +87,12 @@ python -m sionna_gen.build_cache  的四阶段（各阶段产物已存在即 ski
 | 天线 | 单 TX（近墙角候选点采样、高 2.12m、iso 单天线 V 极化）→ 单 UE RX（高 1.25m） |
 | 轨迹 | 480 快照 @60Hz（恒 8s 时窗），解析直线/折线/平滑随机游走（自由空间避障，名义 0.8 m/s、实际 0.29–0.84） |
 | 房间尺寸 | **w,d 逐场景独立 U(7,15)m、h=3m 固定**（用户决策 2026-11-28；`room_size_range_m` 置 null 回固定 10×10 模式） |
-| 材质 | 类别固定映射：地板/天花 concrete、外墙 brick、隔墙/隔断/圆柱 marble、家具 wood 80%/metal 20%、人体 wood 近似 |
+| 材质 | 类别固定映射：地板/天花 concrete、外墙 brick、隔墙/隔断/柱子 marble、家具 wood 80%/metal 20%、人体 wood 近似 |
+| 布局元素 | **0-2 面贯通带门洞隔墙**（1/3 场景无——用户决策 2026-11-28，真实环境贯通隔墙少）+ 0-3 随机朝向隔墙 + **0-2 柱子（圆柱 r 0.15-0.35m / 方柱边长 0.3-0.8m 各半）** + 0-4 家具 |
 | 人体 | **默认开**（`human_occluder: true`）：8 段轮廓 mesh 注入场景、逐快照 solve、yaw 跟随轨迹切向；`--human-frac 0.2` = 按场景种子 20% 开（跨分片确定一致，见陷阱 17） |
 | RT | PathSolver(deterministic=True)、max_depth=3、samples_per_src=1e6、LOS+镜面+折射开、漫射/绕射关、`rt_rx_chunk=64` 分块（陷阱 13）、seed = 3407*1000003 + scene_id |
 | LOS 标签 | **几何视线判定**（2026-11-28 重定义，陷阱 5）：`los`/`los_without_human` = 视线相交测试；`los_blocked_by_human` = 人体躯干轴心穿越 |
-| 点云 | 40960 表面采样点 + FPS 2048（模型输入规模） |
+| 点云 | 40960 表面采样点（**全局按面积加权**，逐 mesh 密度均匀）+ FPS 2048；**默认不含房顶**（`env_pc_include_ceiling=False`，对齐真实 SLAM；RT 场景天花板保留物理反射） |
 | **不含 cir** | **cir 不落盘（用户决策）**：系数/时延仅在内存用于 CSI 合成与统计；逐快照信道元数据全在 `link_summary.csv` |
 
 **产物清单**（每个场景）：
@@ -144,17 +150,23 @@ CUDA_VISIBLE_DEVICES=1 conda run -n sionna --no-capture-output \
 LOS 标签与 metadata 几何一致（los 恒 0 合法——TX 与轨迹被隔墙分隔的锁孔场景；
 几何判定法见陷阱 5）。
 
-**④ 批量 1000–5000 场景（多卡分片；断点安全，中断直接重跑同命令续传）**：
+**④ 批量 2500 场景（多卡分片；断点安全，中断直接重跑同命令续传）**：
 ```bash
-# 例：2 卡分片 4000 场景（各卡 range 不相交；human-frac 各分片保持一致——场景级种子
-# 决定，同一场景 id 在任何分片/重跑下人体开关都相同）
+# 量产配置（2026-11-28 用户决策）：2500 场景；--human-frac 0.25 是刻意选择——
+# 人体分带判据（陷阱 17）下 2500 连号在 0.2 时只有 16% 人体场景，0.25 恰好给出 ~21%。
+# 各卡 range 不相交；同一场景 id 在任何分片/重跑下人体开关都相同。
+# 某卡被其他任务占用显存时，可在该分片加 yaml 覆盖 rt_rx_chunk（如 16）缩小脚印，
+# 分块大小不影响逐 RX 结果。
 CUDA_VISIBLE_DEVICES=0 conda run -n sionna --no-capture-output \
-  python -u -m sionna_gen.build_cache --start    0 --num-scenes 2000 --human-frac 0.2 \
+  python -u -m sionna_gen.build_cache --start    0 --num-scenes 1250 --human-frac 0.25 \
   --stages scenes env_pc rt
 CUDA_VISIBLE_DEVICES=1 conda run -n sionna --no-capture-output \
-  python -u -m sionna_gen.build_cache --start 2000 --num-scenes 2000 --human-frac 0.2 \
+  python -u -m sionna_gen.build_cache --start 1250 --num-scenes 1250 --human-frac 0.25 \
+  --config <该卡显存吃紧时的覆盖yaml> \
   --stages scenes env_pc rt
 # 窄带兼容子集无需单独跑（双口径默认同 solve 双写）
+# 验证不再单独跑 pilot：前 ~20 个场景出来即做 sanity + QC 把关（每场景独立，
+# 有问题止损成本只有几分钟），通过后任其跑完。
 ```
 **⑤ 批量 QC（生成完做一次全量体检扫描）**：
 ```bash
@@ -195,7 +207,8 @@ EOF
 | rt 人体场景（+480 次逐快照 solve） | 估 5–15 min/场景 @GPU | **实测 ≈16.2±1.0s（human-loop+post）；单场景全程 ≈21s，100 场景双卡 17min**（原估算高估 ~20×） |
 | 磁盘 | ~6–10 MB/场景 → 1000 ≈ 6–10GB，5000 ≈ 30–50GB | dataset ≈9MB/场景 + 几何 ≈0.16MB/场景（区间内） |
 
-推算：**1000 场景 ≈3h、5000 场景 ≈15h**（双卡）。调参入口（`--config <yaml>` 覆盖
+推算：**独占卡 ≈3h/1000 场景**（2500 实测 8.2–8.8h 是与外部 GPU 任务分时的拖慢值，
+数据质量不受影响）。调参入口（`--config <yaml>` 覆盖
 GenConfig，未知键报错）：`samples_per_src`（默认 1e6）、`rt_rx_chunk`（solveA 分块，
 显存吃紧调小）、`n_snapshots`（480）、`traj_speed_m_s`、`pc_full_points/pc_fps_points`、
 `out_root`。**正式库保持默认值**，与 10rooms 口径可比。
@@ -253,12 +266,17 @@ Dr.Jit 分配缓存，不代表持续计算。
     按 1000 一片分片时占比正确；取任意连续子集时人体占比可能是 0% 或 100%。
 18. **房间尺寸（2026-11-28 用户决策）**：`room_size_range_m = (7.0, 15.0)`——w,d 逐场景
     独立 U(7,15)m、h 固定 3m（yaml 置 null 可回固定 10×10 模式）。
+19. **配方二轮修订（2026-11-28 用户决策，目检驱动）**：分房隔墙 0-2 面均匀（1/3 场景
+    无隔墙——真实环境贯通隔墙少）；柱子 = 圆柱（r 0.15-0.35m）/方柱（边长 0.3-0.8m
+    独立采样）各 50%；**env_pc 点云改为全局按面积加权采样**（旧版逐 mesh 等额使门楣
+    等小面片密度虚高 ~24×——目检发现，逐 mesh 复核已验证修复）；**点云默认不含房顶**
+    （`env_pc_include_ceiling=False` 对齐真实 SLAM；RT 场景天花板保留物理反射）。
 
 数据集纪律（沿用旧 §8，仍有效）：
-19. **PNG 是数据集资产、张量是派生**——不要把张量当数据集 floorplan（rooms10 布局中
+20. **PNG 是数据集资产、张量是派生**——不要把张量当数据集 floorplan（rooms10 布局中
     floorplan 仅 QC 可选）。
-20. **Radio Map 仅可视化**（用户约定），不要写进数据集或喂模型。
-21. **划分纪律**：同一场景的样本永不跨 train/test（合成数据重演 D53"相邻样本跨 split"
+21. **Radio Map 仅可视化**（用户约定），不要写进数据集或喂模型。
+22. **划分纪律**：同一场景的样本永不跨 train/test（合成数据重演 D53"相邻样本跨 split"
     教训没有借口）。
 
 ### PC.6 交付回传
@@ -606,7 +624,9 @@ raster vs none 的零样本差距 = "几何先验在多场景下是否可迁移"
 - [x] 用户：建 env `sionna` + 实装 `sionna-rt==2.2.0`（生成机 4090×2，2026-11-28 就绪）
 - [x] sanity_check 通过（pilot v4：4/4 场景全 PASS，NMSE/轨迹/标签全绿）
 - [x] pilot 100 场景（2026-11-28 完成，双卡 17 min，全套 QC 通过，实测回填 §PC.4）
-- [ ] 批量 1000–5000 场景启动（规模与参数待用户确认；实测 1000 ≈3h、5000 ≈15h 双卡）
+- [x] 批量 2500 场景完成（2026-11-28：GPU0 0–1249 chunk64 / GPU1 1250–2499 chunk16，
+      全套 QC 通过，见 §PC.0）
+- [ ] Phase PC bugfix/口径变更 + 2500 数据提交 git 固化（代码 + 本文档）
 - [ ] Phase PC bugfix/口径变更提交 git 固化（rt_runner/config/scene_generator/
       trajectory/sanity_check + 本文档）
 - [ ] PROJECT_LOG §12 誊录（生成机实测 + bug 修复清单 + pilot 记录）
@@ -621,4 +641,6 @@ raster vs none 的零样本差距 = "几何先验在多场景下是否可迁移"
 | 2026-11-27 | Phase PC 转向 rooms10 对齐（PROJECT_LOG §12）；训练机 V100 无兼容 GPU，CPU llvm 冒烟 5s/场景全链路通过 | 布局切换 + 轨迹/人体/点云/双带宽落地 |
 | 2026-11-28 | 生成机（4090×2）pilot 执行：修复 6 个 bug——①solveA 480RX 全批量 OOM→`rt_rx_chunk=64` 分块（bitwise 等价验证）②人体 solve 闭包误用无人体场景（blocked 恒 0）③家具材质 wood/metal 比例反转（79% metal→80% wood）④人体内联 bsdf 与 wood 家具重名 duplicate ID 崩溃 ⑤折线顶点恒 3（→3-4）⑥几何相交 `_seg_poly_t` 裁剪上下界写反；LOS 改几何判定（旧 min-tau 2ns 法 37% 误标穿墙/掠射反射）| pilot v4 100 场景 17min，全套 QC 绿（0 坏场景、独立对拍 0 不一致、tau 交叉 100% 吻合、4×sanity PASS），实测回填 §PC.4 |
 | 2026-11-28 | 房间尺寸多样性（用户决策）：w,d 逐场景 U(7,15)m、h=3m 固定；500 场景元数据审计（尺寸均匀、小房间轨迹不退化）| 旧 10×10 固定尺寸产物清除重生成 |
+| 2026-11-28 | 配方二轮修订（用户目检驱动）：分房隔墙 0-2 面均匀、柱子圆柱/方柱各半（方柱边长 0.3-0.8m）、env_pc 全局按面积加权采样（修复逐 mesh 等额导致的门楣密度虚高 ~24×）、点云默认不含房顶 | 500 场景审计（无隔墙 33%、方柱/圆柱 249/225）+ 逐 mesh 密度复核全 ≈ 均值；pilot v5 重生成 |
+| 2026-11-28 | **量产 2500 场景完成**（用户定规模；GPU0 0-1249 chunk64 / GPU1 1250-2499 chunk16——GPU1 与其他用户训练任务共享分时） | 8.2-8.8h（分时拖慢 ~8×，独占卡 ~3h）；全套 QC 绿：0 坏场景、tau 交叉 99.95%、4×sanity PASS、人体 529/2500（21.2%，有遮挡 172）、几何 LOS 中位 64%、零路径>30% 场景 188、dataset 22GB（8.8MB/场景）|
 | 2026-11-28 | SIONNA_HANDOFF.md 并入本文档（§Phase PC）后删除；此后唯一维护本文档 | — |

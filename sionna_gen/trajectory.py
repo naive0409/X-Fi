@@ -26,7 +26,7 @@ def blocker_boxes(meta, clearance_m):
     from .scene_generator import _aabb
     boxes = [_aabb(it['footprint']) for it in meta['items']
              if it['kind'] in ('outer_wall', 'divider', 'partition',
-                               'cylinder', 'furniture')]
+                               'cylinder', 'column', 'furniture')]
     return [(b[0] - clearance_m, b[1] - clearance_m,
              b[2] + clearance_m, b[3] + clearance_m) for b in boxes]
 

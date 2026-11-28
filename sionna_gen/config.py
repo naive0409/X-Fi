@@ -83,6 +83,8 @@ class GenConfig:
     # ---- 环境点云（替代 Isaac lidar：mesh 表面采样；每场景一张静态图）
     pc_full_points: int = 40960     # 全分辨率表面采样点数
     pc_fps_points: int = 2048       # FPS 下采样（模型输入规模）
+    env_pc_include_ceiling: bool = False  # 点云是否含房顶（用户决策 2026-11-28 默认不含，
+                                          # 对齐真实 SLAM 采集；RT 场景天花板保留物理反射）
     # ---- 射追（PathSolver；主线不开绕射——开销 3-10 倍，留开关做对照）
     max_depth: int = 3
     samples_per_src: int = 1_000_000
@@ -103,10 +105,11 @@ class GenConfig:
     room_h_m: float = 3.0
     room_size_range_m: tuple = (7.0, 15.0)  # 逐场景 [w,d] 均匀采样范围；None = 固定尺寸
     wall_thickness_m: float = 0.1   # RT 几何实际厚度（thin-box，材质 thickness 同值）
-    n_divider_min: int = 1          # 分房隔墙（轴对齐、开门洞）
-    n_divider_max: int = 2
+    n_divider_min: int = 0          # 分房隔墙（轴对齐、开门洞；用户决策 2026-11-28：
+    n_divider_max: int = 2          # 真实环境贯通隔墙少见，0-2 面均匀、1/3 场景无隔墙）
     n_partition_max: int = 3        # 追加随机朝向大理石隔墙（0-3，MUSE-FM 配方）
-    n_cylinder_max: int = 2         # 大理石圆柱（0-2，MUSE-FM 配方）
+    n_column_max: int = 2           # 柱子 0-2（圆柱 r 0.15-0.35m / 方柱边长 0.3-0.8m 各半，
+                                    # 用户决策 2026-11-28 增加方柱；marble，贯通全高）
     n_furniture_max: int = 4        # 家具级低障碍（0-4，wood/metal）
     door_width_m: float = 0.9
     door_height_m: float = 2.1
